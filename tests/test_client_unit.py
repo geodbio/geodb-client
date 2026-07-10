@@ -20,6 +20,7 @@ class FakeResponse:
         self.content = body or (json.dumps(payload).encode() if payload is not None else b"")
         self.text = self.content.decode("utf-8", "replace")
         self.url = url
+        self.headers = {}
 
     @property
     def ok(self):
@@ -106,6 +107,23 @@ def test_auth_error_maps_to_exception():
     gx = make_client(routes)
     with pytest.raises(AuthError):
         list(gx.collars())
+
+
+def test_download_follows_redirect_without_grant_header(tmp_path):
+    # Security invariant: the grant token authenticates the asset-redirect
+    # endpoint but must NEVER be sent to the storage URL the 302 points at.
+    redirect = FakeResponse(302, url="http://t/api/v2/stac/assets/cog/1/")
+    redirect.headers = {"Location": "http://blob.example/signed.tif?sig=abc"}
+    blob = FakeResponse(200, body=b"COGBYTES", url="http://blob.example/signed.tif?sig=abc")
+    routes = {("GET", "/stac/assets/cog/1/"): redirect,
+              ("GET", "http://blob.example/"): blob}
+    gx = make_client(routes)
+    out = gx._download("http://t/api/v2/stac/assets/cog/1/", str(tmp_path / "c.tif"))
+    assert open(out, "rb").read() == b"COGBYTES"
+    first_headers = gx._session.calls[0][2]
+    follow_headers = gx._session.calls[1][2]
+    assert first_headers["Authorization"] == "Grant gdbg_test"   # auth on the redirect endpoint
+    assert not follow_headers or "Authorization" not in follow_headers  # not on storage
 
 
 def test_not_found_maps_to_exception():

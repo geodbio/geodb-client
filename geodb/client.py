@@ -245,16 +245,27 @@ class Client:
         return {}
 
     def _download(self, url, path, chunk_size=1 << 20):
-        # allow_redirects=True follows the 302 to a signed URL. requests strips
-        # the Authorization header on a cross-host redirect, so the grant token
-        # is never sent to blob storage.
-        with self._session.get(url, headers=self._headers(), stream=True,
-                               allow_redirects=True, timeout=self.timeout) as resp:
-            if resp.status_code in (401, 403):
-                raise AuthError("Access denied downloading asset.")
-            if resp.status_code == 404:
-                raise NotFoundError(f"Asset not found: {url}")
-            resp.raise_for_status()
+        # The first hop is the authenticated asset/export redirect endpoint. Do
+        # NOT auto-follow: the 302 Location is a self-authenticating URL (a
+        # short-lived signed blob URL in prod, or a dev media URL) and the grant
+        # token must never travel to it — the read-only grant gate rejects the
+        # grant header on any non-API path (a same-host dev redirect would 403).
+        # So resolve the redirect ourselves and fetch the target UNauthenticated.
+        resp = self._session.get(url, headers=self._headers(),
+                                 allow_redirects=False, timeout=self.timeout)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            target = resp.headers.get("Location")
+            if not target:
+                raise APIError(resp.status_code, "redirect without Location", url)
+            from urllib.parse import urljoin
+            resp = self._session.get(urljoin(url, target), stream=True,
+                                     timeout=self.timeout)
+        if resp.status_code in (401, 403):
+            raise AuthError("Access denied downloading asset.")
+        if resp.status_code == 404:
+            raise NotFoundError(f"Asset not found: {url}")
+        resp.raise_for_status()
+        with resp:
             with open(path, "wb") as fh:
                 for chunk in resp.iter_content(chunk_size=chunk_size):
                     if chunk:
