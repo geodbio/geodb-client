@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geodb-client"
+version = "0.1.0"
+description = "Python client for the geoDB Open Exploration Protocol (drill, assay, geophysics, STAC, GeoParquet)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Aqua Terra Geoscientists / geoDB", email = "joshua@geodb.io" }]
+keywords = ["geodb", "mineral-exploration", "drillhole", "geophysics", "stac", "geoparquet"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "requests>=2.28",
+    "pandas>=1.5",
+    "pyarrow>=10",
+]
+
+[project.optional-dependencies]
+geo = ["geopandas>=0.12"]
+dev = ["pytest>=7", "responses>=0.23"]
+
+[project.urls]
+Homepage = "https://github.com/geodb-io/geodb-protocol"
+Protocol = "https://github.com/geodb-io/geodb-protocol"
+
+[tool.setuptools]
+packages = ["geodb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
