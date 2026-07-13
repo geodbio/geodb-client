@@ -1,6 +1,6 @@
 # geodb-client
 
-The Python client for the **[geoDB Open Exploration Protocol](https://github.com/geodb-io/geodb-protocol)** —
+The Python client for the **[geoDB Open Exploration Protocol](https://github.com/geodbio/geodb-protocol)** —
 pull a mining-exploration project's drill, assay, geophysics, raster, and document
 data as pandas DataFrames and files, over one authenticated, project-scoped API.
 

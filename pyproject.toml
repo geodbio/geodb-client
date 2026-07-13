@@ -29,8 +29,8 @@ geo = ["geopandas>=0.12"]
 dev = ["pytest>=7", "responses>=0.23"]
 
 [project.urls]
-Homepage = "https://github.com/geodb-io/geodb-protocol"
-Protocol = "https://github.com/geodb-io/geodb-protocol"
+Homepage = "https://github.com/geodbio/geodb-protocol"
+Protocol = "https://github.com/geodbio/geodb-protocol"
 
 [tool.setuptools]
 packages = ["geodb"]

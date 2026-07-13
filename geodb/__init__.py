@@ -5,7 +5,7 @@ geodb-client — the Python client for the geoDB Open Exploration Protocol.
     gx = geodb.Client(token="gdbg_...", base_url="https://api.geodb.io")
     collars = gx.collars().to_dataframe()
 
-See https://github.com/geodb-io/geodb-protocol for the protocol spec.
+See https://github.com/geodbio/geodb-protocol for the protocol spec.
 """
 
 from .client import Client
