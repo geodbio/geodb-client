@@ -289,9 +289,60 @@ class Client:
     def point_samples(self, **filters):
         return Paginated(self, "/point-samples/", filters)
 
+    def qc_samples(self, **filters):
+        """QA/QC samples (standards, blanks, duplicates)."""
+        return Paginated(self, "/qc-samples/", filters)
+
     def surveys(self, **filters):
-        """Geophysical surveys (metadata + WGS84 footprint)."""
+        """Geophysical surveys (metadata + WGS84 footprint).
+
+        NOTE: geophysical, not downhole. Downhole survey stations (azimuth/dip
+        down the hole) are :meth:`drill_surveys`.
+        """
         return Paginated(self, "/geophysical-surveys/", filters)
+
+    # ── The downhole interval tables ───────────────────────────────────────
+    # The same tables geoDB serves to Leapfrog and Vulcan over ODBC. Each is a
+    # depth interval (or a depth station) hung off a collar's `bhid`.
+
+    def drill_surveys(self, **filters):
+        """Downhole survey stations — depth_at, azimuth, dip."""
+        return Paginated(self, "/drill-surveys/", filters)
+
+    def lithology(self, **filters):
+        """Downhole lithology intervals."""
+        return Paginated(self, "/drill-lithologies/", filters)
+
+    def alteration(self, **filters):
+        """Downhole alteration intervals."""
+        return Paginated(self, "/drill-alterations/", filters)
+
+    def structures(self, **filters):
+        """Downhole structural measurements — point (depth_at only) and zone
+        (depth_from/depth_to) in one table; filter on the depth fields to split
+        them the way the exports do."""
+        return Paginated(self, "/drill-structures/", filters)
+
+    def mineralization(self, **filters):
+        """Downhole mineralization intervals (mineral percentages)."""
+        return Paginated(self, "/drill-mineralizations/", filters)
+
+    def veins(self, **filters):
+        """Downhole vein intervals (type, width, mineral contents)."""
+        return Paginated(self, "/drill-veins/", filters)
+
+    def rqd(self, **filters):
+        """Downhole geotech: core recovery + rock mass (RQD, Q-system, RMR)."""
+        return Paginated(self, "/drill-rqds/", filters)
+
+    def spectral(self, **filters):
+        """Downhole spectral intervals (geounit abundances)."""
+        return Paginated(self, "/drill-spectral-intervals/", filters)
+
+    def custom_intervals(self, **filters):
+        """User-defined downhole intervals. TYPE IS DATA: a categorical row
+        carries its value's name, a numeric row carries its measure."""
+        return Paginated(self, "/drill-custom-intervals/", filters)
 
     # ── Assets lane ────────────────────────────────────────────────────────
     def stac(self):

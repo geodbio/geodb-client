@@ -194,3 +194,42 @@ def test_export_error_state_raises():
 
 def test_version_exposed():
     assert geodb.__version__ == "0.1.0"
+
+
+# ── The drilling tables (records lane) ──────────────────────────────────────
+def test_every_drilling_lane_hits_its_endpoint():
+    """The records lane covers the same drilling tables the bulk lane exports —
+    a vendor should never have to fall back to a raw URL for a table we serve."""
+    import geodb
+
+    expected = {
+        "collars": "/drill-collars/",
+        "drill_surveys": "/drill-surveys/",
+        "lithology": "/drill-lithologies/",
+        "alteration": "/drill-alterations/",
+        "samples": "/drill-samples/",
+        "structures": "/drill-structures/",
+        "mineralization": "/drill-mineralizations/",
+        "veins": "/drill-veins/",
+        "rqd": "/drill-rqds/",
+        "spectral": "/drill-spectral-intervals/",
+        "custom_intervals": "/drill-custom-intervals/",
+        "point_samples": "/point-samples/",
+        "qc_samples": "/qc-samples/",
+        "assays": "/assays/",
+        "surveys": "/geophysical-surveys/",
+    }
+    gx = geodb.Client(token="gdbg_x")
+    for method, path in expected.items():
+        assert hasattr(gx, method), f"Client has no .{method}()"
+        assert getattr(gx, method)()._path == path
+
+
+def test_drill_surveys_and_surveys_are_different_tables():
+    """`surveys()` is GEOPHYSICAL; `drill_surveys()` is downhole stations. They
+    are one keystroke apart and mean entirely different things."""
+    import geodb
+
+    gx = geodb.Client(token="gdbg_x")
+    assert gx.surveys()._path == "/geophysical-surveys/"
+    assert gx.drill_surveys()._path == "/drill-surveys/"
