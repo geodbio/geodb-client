@@ -8,6 +8,13 @@ data as pandas DataFrames and files, over one authenticated, project-scoped API.
 pip install geodb-client            # + geopandas extra:  pip install "geodb-client[geo]"
 ```
 
+> **Integrating for the first time?** Read
+> [`AGENTS.md`](https://github.com/geodbio/geodb-protocol/blob/main/AGENTS.md)
+> in the protocol repo first. It names the handful of things in this domain
+> that give you silently wrong answers — starting with the coordinate rule
+> below — and carries the sync loop, the error codes and runnable examples in
+> four languages.
+
 ## 20 lines to DataFrames
 
 ```python
@@ -112,6 +119,12 @@ the data, so you never lose the surveyor's original CRS.
 means, and `epsg` tells you how to read them. The `geometry` column is always
 WGS84. Read geometry for maps; read the natives when you need exactly what the
 surveyor recorded.
+
+The same rule applies to every record the API returns, not only exports. Each
+row also carries `source_coordinate` (`{x, y, epsg}` — the same values under
+names that cannot be mistaken for degrees) and `geometry_geojson` (WGS84 as a
+parsed GeoJSON `Point`). Prefer those two: decide by `epsg`, never by the field
+name.
 
 ## Development
 
