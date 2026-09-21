@@ -31,6 +31,7 @@ dev = ["pytest>=7", "responses>=0.23"]
 [project.urls]
 Homepage = "https://github.com/geodbio/geodb-protocol"
 Protocol = "https://github.com/geodbio/geodb-protocol"
+Documentation = "https://github.com/geodbio/geodb-protocol/blob/main/AGENTS.md"
 
 [tool.setuptools]
 packages = ["geodb"]
