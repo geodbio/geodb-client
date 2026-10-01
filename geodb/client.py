@@ -405,12 +405,15 @@ class Client:
         Coordinates carry their own ``epsg``, in the numbers you have; never
         pre-convert. Returns a :class:`WriteResult`.
 
-        ``make_default_set`` has no method of its own on purpose: it changes
-        what everyone on the project sees, runs only through a PERSON's own key
-        (a vendor key is always refused) and only on their explicit request.
-        Send it through this call — ``write(model, [],
-        intent="make_default_set", logging_set="<set>", dry_run=True)``, then
-        again with ``confirm=<the dry run's "confirm">`` after the user's yes.
+        ``make_default_set`` and ``qaqc_verdict`` have no methods of their own
+        on purpose: each changes what everyone on the project sees, runs only
+        through a PERSON's own key (a vendor key is always refused) and only on
+        their explicit request. Send them through this call with a dry run
+        first, then again with ``confirm=<the dry run's "confirm">`` after the
+        user's yes — e.g. ``write(model, [], intent="make_default_set",
+        logging_set="<set>", dry_run=True)``, or
+        ``write("Certificate", [{...}], intent="qaqc_verdict", dry_run=True)``.
+        ``qc_reconnect`` (model ``"QCSample"``) goes through here too.
         """
         body = {"model": model, "intent": intent, "records": rows_from(rows),
                 "dry_run": bool(dry_run)}

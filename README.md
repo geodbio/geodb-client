@@ -168,10 +168,12 @@ for w in gx.writes(undone=False): ...          # what this key wrote, newest fir
 `logging_set=` is the body's `"set"`, for every set-aware family (sample sets
 too). `undo()` and `restore()` take `idempotency_key=` like `write()`.
 `result.raise_for_refusals()` raises `geodb.RowsRefused` (status 200, `.rows`)
-when rows were refused. `make_default_set` has no method on purpose — it is a
-person's own act on their explicit request (a vendor key is refused); send it
-with `gx.write(model, [], intent="make_default_set", logging_set="<set>",
-dry_run=True)`, then with `confirm=` after the user's yes.
+when rows were refused. `make_default_set` and `qaqc_verdict` have no methods
+on purpose — each is a person's own act on their explicit request (a vendor key
+is refused); send them through `gx.write(...)` with `dry_run=True`, then with
+`confirm=` after the user's yes (e.g. `gx.write(model, [],
+intent="make_default_set", logging_set="<set>", dry_run=True)`). `qc_reconnect`
+(model `"QCSample"`) goes through `gx.write(...)` too.
 
 The rules the server enforces (and an AI writing for a person must respect):
 coordinates carry their own `epsg` (never pre-convert; a row without it is
