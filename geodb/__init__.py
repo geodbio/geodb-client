@@ -15,7 +15,7 @@ See https://github.com/geodbio/geodb-protocol for the protocol spec.
 
 from .client import Client
 from .errors import (
-    GeodbError, AuthError, NotFoundError, APIError, ExportError, WriteRefused,
+    GeodbError, AuthError, NotFoundError, APIError, ExportError, WriteRefused, RowsRefused,
 )
 from .writes import WriteResult
 
@@ -24,6 +24,6 @@ __version__ = "0.1.0"
 __all__ = [
     "Client",
     "GeodbError", "AuthError", "NotFoundError", "APIError", "ExportError",
-    "WriteRefused", "WriteResult",
+    "WriteRefused", "RowsRefused", "WriteResult",
     "__version__",
 ]

@@ -122,12 +122,11 @@ class WriteResult:
         return self._client.undo(self.write_id, dry_run=dry_run)
 
     def raise_for_refusals(self):
-        """Raise :class:`geodb.WriteRefused` naming the first refused row, if any."""
-        from .errors import WriteRefused
+        """Raise :class:`geodb.RowsRefused` (status 200: the request was
+        answered) carrying every refused or skipped row, if any."""
+        from .errors import RowsRefused
         if self.refused:
-            row = self.refused[0]
-            raise WriteRefused(422, dict(row, detail=f"row {row.get('index')}: "
-                                         f"{row.get('detail') or row.get('reason_code')}"))
+            raise RowsRefused(self.refused)
         return self
 
     def to_dataframe(self):

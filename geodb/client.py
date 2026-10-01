@@ -392,9 +392,11 @@ class Client:
                 values is skipped and named), ``"upsert"``, or ``"update"``
                 (existing records only, by identity or geoDB ``id``). Upsert and
                 update change the user's data: dry-run first and ask the user.
-            logging_set: the set interval / sample rows belong to — an existing
-                set's name, or ``{"name": "…", "create": True}`` for a new one.
-                Required for set-aware models; never guess it, ask the user.
+            logging_set: the SET the rows belong to — sent as the body's
+                ``"set"``, for every set-aware family (lithology, alteration, …
+                and drill-sample sets alike): an existing set's name, or
+                ``{"name": "…", "create": True}`` for a new one. Required for
+                set-aware models; never guess it, ask the user.
             idempotency_key: send one (e.g. a uuid you keep) to make a retry of
                 the same request safe: it replays the first answer.
             dry_run: True validates — the same per-row outcomes, nothing written.
@@ -402,6 +404,13 @@ class Client:
 
         Coordinates carry their own ``epsg``, in the numbers you have; never
         pre-convert. Returns a :class:`WriteResult`.
+
+        ``make_default_set`` has no method of its own on purpose: it changes
+        what everyone on the project sees, runs only through a PERSON's own key
+        (a vendor key is always refused) and only on their explicit request.
+        Send it through this call — ``write(model, [],
+        intent="make_default_set", logging_set="<set>", dry_run=True)``, then
+        again with ``confirm=<the dry run's "confirm">`` after the user's yes.
         """
         body = {"model": model, "intent": intent, "records": rows_from(rows),
                 "dry_run": bool(dry_run)}
@@ -434,7 +443,8 @@ class Client:
                           idempotency_key=idempotency_key,
                           confirm="retract" if confirm else None)
 
-    def restore(self, write_id=None, *, audit_batch_id=None, dry_run=False):
+    def restore(self, write_id=None, *, audit_batch_id=None, dry_run=False,
+                idempotency_key=None):
         """Bring a removed batch back from the Trash: a retract's ``write_id``,
         or any Trash batch's ``audit_batch_id``. A restore is a write of its own."""
         if (write_id is None) == (audit_batch_id is None):
@@ -444,14 +454,15 @@ class Client:
             body["write_id"] = str(write_id)
         else:
             body["audit_batch_id"] = str(audit_batch_id)
-        return self._records(body)
+        return self._records(body, idempotency_key)
 
-    def undo(self, write_id, dry_run=False):
+    def undo(self, write_id, dry_run=False, *, idempotency_key=None):
         """Reverse one earlier write by its ``write_id``. Rows changed by a later
         write are left as they are and named (``undo_stale``); the result's
-        ``complete`` says whether every row was reversed."""
+        ``complete`` says whether every row was reversed. A retry with the same
+        ``idempotency_key`` replays the first answer."""
         return self._records({"intent": "undo", "write_id": str(write_id),
-                              "dry_run": bool(dry_run)})
+                              "dry_run": bool(dry_run)}, idempotency_key)
 
     def writes(self, write_id=None, **filters):
         """What this key wrote, newest first (each with its undo handle), as a

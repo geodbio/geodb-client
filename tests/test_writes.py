@@ -81,9 +81,11 @@ def test_write_sends_one_body_to_the_one_endpoint():
     assert isinstance(result, WriteResult)
     assert result.write_id == "w-1" and not result.ok
     assert [r["reason_code"] for r in result.refused] == ["missing_crs"]
-    with pytest.raises(WriteRefused) as exc:
+    with pytest.raises(geodb.RowsRefused) as exc:
         result.raise_for_refusals()
     assert exc.value.reason_code == "missing_crs"
+    assert exc.value.status_code == 200                 # answered, never an invented 4xx
+    assert [r["index"] for r in exc.value.rows] == [1]
 
 
 def test_validate_is_the_dry_run():
@@ -126,10 +128,12 @@ def test_undo_restore_and_the_write_log():
                    FakeResponse(200, {"count": 1, "next": None,
                                       "results": [{"write_id": "w-1"}]}),
                    FakeResponse(200, {"write_id": "w-1", "rows": []}))
-    assert gx.undo("w-1").complete is True
+    assert gx.undo("w-1", idempotency_key="u-key").complete is True
+    assert s.calls[0][2]["headers"]["Idempotency-Key"] == "u-key"
     assert s.calls[0][2]["json"] == {"intent": "undo", "write_id": "w-1", "dry_run": False}
-    gx.restore("w-9")
+    gx.restore("w-9", idempotency_key="r-key")
     assert s.calls[1][2]["json"] == {"intent": "restore", "write_id": "w-9", "dry_run": False}
+    assert s.calls[1][2]["headers"]["Idempotency-Key"] == "r-key"
     assert [w["write_id"] for w in gx.writes(undone=False)] == ["w-1"]
     assert s.calls[2][1] == "http://t/api/v2/records/writes/"
     assert s.calls[2][2]["params"]["undone"] == "false"

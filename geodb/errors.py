@@ -61,3 +61,18 @@ class WriteRefused(APIError):
                    + (f" — {body['remedy']}" if body.get("remedy") else ""))
         super().__init__(status_code, message, url)
         self._keep(body)
+
+
+class RowsRefused(WriteRefused):
+    """Raised only by ``WriteResult.raise_for_refusals()``: the request was
+    ANSWERED (HTTP 200) but some rows were refused or skipped. ``rows`` holds
+    them, each with its ``reason_code`` and ``remedy``; ``reason_code`` /
+    ``remedy`` are the first one's."""
+
+    def __init__(self, rows, url=None):
+        rows = list(rows or [])
+        first = dict(rows[0]) if rows else {}
+        first['detail'] = (f"{len(rows)} row(s) refused or skipped; row {first.get('index')}: "
+                           f"{first.get('detail') or first.get('reason_code')}")
+        super().__init__(200, first, url)
+        self.rows = rows
