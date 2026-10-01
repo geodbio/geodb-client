@@ -15,7 +15,8 @@ import time
 
 import requests
 
-from .errors import AuthError, NotFoundError, APIError, ExportError
+from .errors import AuthError, NotFoundError, APIError, ExportError, WriteRefused
+from .writes import WriteResult, rows_from
 
 __all__ = ["Client"]
 
@@ -226,12 +227,22 @@ class Client:
                                   headers=self._headers(), timeout=self.timeout)
         return self._handle(resp)
 
+    @staticmethod
+    def _body(resp):
+        try:
+            return resp.json()
+        except ValueError:
+            return None
+
     def _handle(self, resp, raw_status=False):
         if resp.status_code in (401, 403):
-            raise AuthError(f"Access denied ({resp.status_code}). Check the grant "
-                            f"token and its project scope.")
+            body = self._body(resp)
+            code = body.get("reason_code") if isinstance(body, dict) else None
+            raise AuthError(f"Access denied ({resp.status_code}"
+                            + (f", {code}" if code else "")
+                            + "). Check the grant token and its project scope.")._keep(body)
         if resp.status_code == 404:
-            raise NotFoundError(f"Not found: {resp.url}")
+            raise NotFoundError(f"Not found: {resp.url}")._keep(self._body(resp))
         # Export status uses 202 (running) / 200 (done) / 500 (error) as signal.
         if raw_status and resp.status_code in (200, 202, 500):
             try:
@@ -343,6 +354,114 @@ class Client:
         """User-defined downhole intervals. TYPE IS DATA: a categorical row
         carries its value's name, a numeric row carries its measure."""
         return Paginated(self, "/drill-custom-intervals/", filters)
+
+    # ── Writing (the ONE write endpoint) ───────────────────────────────────
+    # Every write is POST /api/v2/records/ with {model, intent, records}; a
+    # key writes only if project() says read_only is false. Answers are per
+    # ROW (WriteResult.rows / .refused); only a refusal of the whole request
+    # raises WriteRefused. Each write returns a write_id that undo() reverses.
+
+    def _records(self, body, idempotency_key=None):
+        headers = self._headers()
+        if idempotency_key:
+            headers["Idempotency-Key"] = str(idempotency_key)
+        resp = self._session.post(self._url("/records/"), json=body, headers=headers,
+                                  timeout=self.timeout)
+        if resp.status_code == 401:
+            self._handle(resp)
+        if resp.status_code != 200:
+            raise WriteRefused(resp.status_code, self._body(resp), resp.url)
+        return WriteResult(self, self._body(resp) or {})
+
+    def describe(self, model, project=None):
+        """The live write contract for ``model``: its fields (and choices), the
+        identifying fields, the set its rows belong to (with the project's
+        sets and which this key may write), the coordinate rule, and which
+        intents need the user's go-ahead first."""
+        params = {"project": project} if project is not None else None
+        return self._get(f"/records/describe/{model}/", params=params)
+
+    def write(self, model, rows, intent="create", *, logging_set=None, project=None,
+              idempotency_key=None, dry_run=False, acknowledge=None, confirm=None):
+        """Write ``rows`` (a list of dicts or a DataFrame) through the one gate.
+
+        Args:
+            model: e.g. ``"DrillCollar"``, ``"DrillSample"``, ``"DrillLithology"``
+                (``describe`` / ``project()["writes"]["models"]`` list them).
+            intent: ``"create"`` (never overwrites; an existing record with other
+                values is skipped and named), ``"upsert"``, or ``"update"``
+                (existing records only, by identity or geoDB ``id``). Upsert and
+                update change the user's data: dry-run first and ask the user.
+            logging_set: the set interval / sample rows belong to — an existing
+                set's name, or ``{"name": "…", "create": True}`` for a new one.
+                Required for set-aware models; never guess it, ask the user.
+            idempotency_key: send one (e.g. a uuid you keep) to make a retry of
+                the same request safe: it replays the first answer.
+            dry_run: True validates — the same per-row outcomes, nothing written.
+            acknowledge: e.g. ``["create_catalog_entries"]`` after asking the user.
+
+        Coordinates carry their own ``epsg``, in the numbers you have; never
+        pre-convert. Returns a :class:`WriteResult`.
+        """
+        body = {"model": model, "intent": intent, "records": rows_from(rows),
+                "dry_run": bool(dry_run)}
+        if logging_set is not None:
+            body["set"] = logging_set
+        if project is not None:
+            body["project"] = project
+        if acknowledge:
+            body["acknowledge"] = list(acknowledge)
+        if confirm is not None:
+            body["confirm"] = confirm
+        return self._records(body, idempotency_key)
+
+    def validate(self, model, rows, intent="create", **kwargs):
+        """``write(..., dry_run=True)``: every row's outcome, nothing written."""
+        kwargs["dry_run"] = True
+        return self.write(model, rows, intent, **kwargs)
+
+    def retract(self, model, rows, *, confirm=False, dry_run=False, project=None,
+                idempotency_key=None):
+        """Move records — and everything that belongs to them — to the Trash.
+
+        Run it with ``dry_run=True`` first and show the user what it lists
+        (``result["cascade"]``); send it with ``confirm=True`` only after their
+        yes. Without the confirm the server refuses (``confirm_required``).
+        Each row names a record by its identifying fields or its geoDB ``id``.
+        Undo (or :meth:`restore`) brings everything back; nothing is ever
+        purged through the API."""
+        return self.write(model, rows, "retract", dry_run=dry_run, project=project,
+                          idempotency_key=idempotency_key,
+                          confirm="retract" if confirm else None)
+
+    def restore(self, write_id=None, *, audit_batch_id=None, dry_run=False):
+        """Bring a removed batch back from the Trash: a retract's ``write_id``,
+        or any Trash batch's ``audit_batch_id``. A restore is a write of its own."""
+        if (write_id is None) == (audit_batch_id is None):
+            raise ValueError("name exactly one of write_id or audit_batch_id")
+        body = {"intent": "restore", "dry_run": bool(dry_run)}
+        if write_id is not None:
+            body["write_id"] = str(write_id)
+        else:
+            body["audit_batch_id"] = str(audit_batch_id)
+        return self._records(body)
+
+    def undo(self, write_id, dry_run=False):
+        """Reverse one earlier write by its ``write_id``. Rows changed by a later
+        write are left as they are and named (``undo_stale``); the result's
+        ``complete`` says whether every row was reversed."""
+        return self._records({"intent": "undo", "write_id": str(write_id),
+                              "dry_run": bool(dry_run)})
+
+    def writes(self, write_id=None, **filters):
+        """What this key wrote, newest first (each with its undo handle), as a
+        paginated iterator — or one write (with its rows) when ``write_id`` is
+        given. Filters: ``model``, ``intent``, ``project``, ``undone``."""
+        if write_id is not None:
+            return self._get(f"/records/writes/{write_id}/")
+        if "undone" in filters and isinstance(filters["undone"], bool):
+            filters["undone"] = "true" if filters["undone"] else "false"
+        return Paginated(self, "/records/writes/", filters, page_size=50)
 
     # ── Assets lane ────────────────────────────────────────────────────────
     def stac(self):

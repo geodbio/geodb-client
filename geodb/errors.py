@@ -2,7 +2,27 @@
 
 
 class GeodbError(Exception):
-    """Base class for all geoDB client errors."""
+    """Base class for all geoDB client errors.
+
+    When the server refused with the protocol's error envelope, the refusal's
+    machine-readable keys are kept: ``reason_code`` (match on this), ``remedy``
+    (what to do next), ``detail``, ``offending`` and the whole ``body``.
+    """
+
+    reason_code = None
+    remedy = None
+    detail = None
+    offending = None
+    body = None
+
+    def _keep(self, body):
+        if isinstance(body, dict):
+            self.body = body
+            self.reason_code = body.get("reason_code")
+            self.remedy = body.get("remedy")
+            self.detail = body.get("detail")
+            self.offending = body.get("offending")
+        return self
 
 
 class AuthError(GeodbError):
@@ -24,3 +44,20 @@ class APIError(GeodbError):
 
 class ExportError(GeodbError):
     """An export job failed or timed out."""
+
+
+class WriteRefused(APIError):
+    """The records endpoint refused the whole request (bad body, a key that may
+    not write, a retract without its confirm, an undo of an undone write, …).
+
+    A refusal of ONE row is not an exception: it comes back in the result's
+    ``rows`` with its own ``reason_code`` and ``remedy``, and the rest of the
+    batch goes on.
+    """
+
+    def __init__(self, status_code, body, url=None):
+        body = body if isinstance(body, dict) else {}
+        message = (f"{body.get('reason_code') or 'refused'}: {body.get('detail') or ''}"
+                   + (f" — {body['remedy']}" if body.get("remedy") else ""))
+        super().__init__(status_code, message, url)
+        self._keep(body)
