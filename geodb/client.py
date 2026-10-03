@@ -78,30 +78,53 @@ class Paginated:
         #: ``limit_clamped``, …) — what the server said about the whole read.
         self.envelope = {}
 
-    def _pages_by_offset(self, data):
-        """The pages after ``first`` when its total is known, fetched in
-        parallel and yielded in order; None when they cannot be (no count, no
-        next page, skip_count, parallel=1)."""
-        rows = data.get("results") or []
-        if (self._parallel < 2 or not data.get("next") or self._count is None
-                or "skip_count" in self._params or not rows):
+    # -- page links -------------------------------------------------------
+    def _link(self, next_link, **changes):
+        """A page link built on the CONFIGURED base URL (the key only ever
+        goes there), carrying the query of the server's ``next`` link —
+        every parameter the read sent, repeated ones kept — with ``changes``
+        applied."""
+        from urllib.parse import parse_qsl, urlencode, urlsplit
+        pairs = [(k, v) for k, v in parse_qsl(urlsplit(next_link).query,
+                                              keep_blank_values=True)
+                 if k not in changes]
+        pairs += [(k, str(v)) for k, v in changes.items()]
+        return self._client._url(self._path) + "?" + urlencode(pairs, doseq=True)
+
+    @staticmethod
+    def _step(next_link):
+        """``(offset, page size)`` the server's ``next`` link names — the
+        stride is the server's page size, never the first page's length (a
+        page may come back short)."""
+        from urllib.parse import parse_qs, urlsplit
+        query = parse_qs(urlsplit(next_link).query)
+        try:
+            return int(query["offset"][-1]), int(query["limit"][-1])
+        except (KeyError, ValueError, IndexError):
             return None
-        served = len(rows)
-        start = int(self._params.get("offset") or 0)
-        offsets = range(start + served, self._count, served)
+
+    def _pages_by_offset(self, data):
+        """The pages after the first when its total is known, fetched
+        ``parallel`` at a time and yielded IN ORDER (each page's whole
+        envelope); None when they cannot be (no count, no next page,
+        skip_count, parallel=1, a next link without offset/limit). A page that
+        fails raises its error where it falls — the pages before it are
+        yielded, nothing after it, never a silent gap."""
+        step = self._step(data["next"]) if data.get("next") else None
+        if (self._parallel < 2 or step is None or self._count is None
+                or "skip_count" in self._params):
+            return None
+        first_offset, size = step
+        if size < 1:
+            return None
+        offsets = range(first_offset, self._count, size)
         if not offsets:
             return None
         from concurrent.futures import ThreadPoolExecutor
-        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-        # Each page is the server's own ``next`` link with its offset moved:
-        # every parameter the read sent rides along exactly as it would.
-        parts = urlsplit(data["next"])
-        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        next_link = data["next"]
 
         def page(offset):
-            link = urlunsplit(parts._replace(query=urlencode(
-                dict(query, limit=served, offset=offset))))
-            return self._client._get_url(link).get("results") or []
+            return self._client._get_url(self._link(next_link, limit=size, offset=offset))
 
         def pages():
             with ThreadPoolExecutor(max_workers=self._parallel) as pool:
@@ -125,16 +148,16 @@ class Paginated:
             yield row
         rest = self._pages_by_offset(data)
         if rest is not None:
-            for rows in rest:
-                for row in rows:
+            for page in rest:
+                for row in page.get("results") or []:
                     yield row
-            return
-        url = data.get("next")
-        while url:
-            data = self._client._get_url(url)
+                data = page
+        # Follow ``next`` from wherever the pages stopped: the sequential read,
+        # or rows added past the first page's count during a parallel one.
+        while data.get("next"):
+            data = self._client._get_url(self._link(data["next"]))
             for row in data.get("results") or []:
                 yield row
-            url = data.get("next")
 
     def to_dataframe(self):
         """Materialise all records into a :class:`pandas.DataFrame`."""

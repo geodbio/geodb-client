@@ -12,6 +12,8 @@ import json
 import threading
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 import geodb
 from geodb.writes import WriteResult
 
@@ -165,3 +167,88 @@ def test_an_export_job_keeps_its_guide_pointers_and_notes():
     job = gx.export("assay_results", project=1).wait(poll_seconds=0)
     assert job.see_guide == [pointer] and job.notes == {"n": "x"}
     assert gx.guide("assay-values", "below-detection")["results"][0]["id"] == "below-detection"
+
+
+# ── review S4: the parallel pager ──────────────────────────────────────────
+class Pages:
+    """A server that answers by offset/limit from the URL query, with knobs
+    for the failure shapes (host of `next`, a short page, a failing page)."""
+
+    def __init__(self, total, size=500, short_first=0, fail_at=None, fail=(500, {}),
+                 next_host="http://t", grow_to=None):
+        self.total, self.size, self.short_first = total, size, short_first
+        self.fail_at, self.fail, self.next_host, self.grow_to = fail_at, fail, next_host, grow_to
+        self.urls = []
+        self.lock = threading.Lock()
+
+    def get(self, url, params=None, headers=None, timeout=None, **kw):
+        query = {k: v for k, v in parse_qs(urlparse(url).query).items()}
+        for k, v in (params or {}).items():
+            # requests sends a list as the key repeated
+            query[k] = [str(x) for x in v] if isinstance(v, (list, tuple)) else [str(v)]
+        with self.lock:
+            self.urls.append((url, {k: list(v) for k, v in query.items()}))
+        offset = int(query.get("offset", ["0"])[-1])
+        limit = min(int(query.get("limit", ["100"])[-1]), self.size)
+        if self.fail_at is not None and offset == self.fail_at:
+            status, body = self.fail
+            return Resp(status, body, headers={"Retry-After": "3"} if status == 429 else None)
+        total = self.total
+        if self.grow_to and offset >= self.total - limit:
+            total = self.grow_to            # rows landed during the read
+        ids = list(range(offset, min(offset + limit, total)))
+        if offset == 0 and self.short_first:
+            ids = ids[:-self.short_first]   # rows vanished between id + fetch
+        more = offset + limit < total
+        nxt = None
+        if more:
+            pairs = [(k, x) for k, vs in query.items() if k not in ("offset", "limit") for x in vs]
+            pairs += [("limit", str(limit)), ("offset", str(offset + limit))]
+            nxt = self.next_host + "/api/v2/x/?" + "&".join(f"{k}={v}" for k, v in pairs)
+        return Resp(200, {"count": self.total if offset == 0 else None, "next": nxt,
+                          "results": [{"id": i} for i in ids]})
+
+
+def gx_for(server, **kw):
+    return geodb.Client(token="gdbg_t", base_url="http://t", session=server, **kw)
+
+
+def test_the_stride_is_the_servers_page_size_not_page_ones_length():
+    server = Pages(total=2000, size=500, short_first=2)
+    ids = [r["id"] for r in gx_for(server).collars(project=1)]
+    assert len(ids) == len(set(ids)), "rows duplicated"
+    assert ids == [i for i in range(2000) if i not in (498, 499)]
+
+
+def test_page_links_go_only_to_the_configured_base_url():
+    server = Pages(total=2000, size=500, next_host="http://elsewhere:9")
+    list(gx_for(server).collars(project=1))
+    assert all(url.startswith("http://t/api/v2/drill-collars/") for url, _q in server.urls)
+
+
+def test_repeated_parameters_ride_every_page():
+    server = Pages(total=1500, size=500)
+    list(gx_for(server).collars(project=1, element=["Au", "Cu"]))
+    assert all(q.get("element") == ["Au", "Cu"] for _url, q in server.urls)
+
+
+@pytest.mark.parametrize("failure, error", [
+    ((401, {"reason_code": "grant_expired", "detail": "expired", "remedy": "renew"}),
+     geodb.errors.AuthError),
+    ((429, {"reason_code": "throttled", "detail": "slow", "remedy": "wait"}),
+     geodb.errors.Throttled),
+    ((503, {"detail": "unavailable"}), geodb.errors.APIError),
+])
+def test_a_page_failing_mid_way_raises_after_the_pages_before_it(failure, error):
+    server = Pages(total=3000, size=500, fail_at=1500, fail=failure)
+    got = []
+    with pytest.raises(error):
+        for row in gx_for(server).collars(project=1):
+            got.append(row["id"])
+    assert got == list(range(1500)), "rows before the failure: in order, none dropped or doubled"
+
+
+def test_rows_added_during_a_parallel_read_are_followed():
+    server = Pages(total=1500, size=500, grow_to=1700)
+    ids = [r["id"] for r in gx_for(server).collars(project=1)]
+    assert ids == list(range(1700))
