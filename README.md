@@ -65,6 +65,7 @@ Behind the `api.` subdomain rewrite, pass `api_prefix="/v2"`.
 | `gx.stac()` | a `StacCatalog`: `.landing()`, `.collections()`, `.items(collection_id)` (yields `StacItem`), `.item(cid, iid)`. `StacItem.asset(key).download(path)`. |
 | `gx.export(model, format="geoparquet", include_assays=True)` | an `ExportJob`: `.wait()` then `.download(path)`. Formats: `geoparquet`, `parquet`, `csv`. Models: the `export()` column below. |
 | `gx.project()` | the grant/project context. |
+| `gx.describe` · `gx.write` · `gx.validate` · `gx.retract` · `gx.restore` · `gx.undo` · `gx.writes` | the write half — see **Writing** below. |
 
 ### Tables
 
@@ -125,6 +126,62 @@ row also carries `source_coordinate` (`{x, y, epsg}` — the same values under
 names that cannot be mistaken for degrees) and `geometry_geojson` (WGS84 as a
 parsed GeoJSON `Point`). Prefer those two: decide by `epsg`, never by the field
 name.
+
+## Writing (a key that may write records)
+
+> geoDB's write half is not yet served by its production servers; these calls
+> answer once it is. `gx.project()` says whether your key may write
+> (`read_only: false`).
+
+Every write goes through ONE endpoint, `POST /api/v2/records/`, and is
+answered **per row**: a bad row comes back with its own `reason_code` and
+`remedy` while the rest of the batch lands. Only a refusal of the whole
+request raises `geodb.WriteRefused` (with `.reason_code` and `.remedy`).
+
+```python
+gx.describe("DrillSample")                    # fields, identity, sets, coordinate rule
+
+rows = [{"bhid": "DH-1", "name": "DH-1-001", "depth_from": 0, "depth_to": 2}]   # or a DataFrame
+check = gx.validate("DrillSample", rows, logging_set="pXRF 2026")   # dry run: nothing written
+result = gx.write("DrillSample", rows, logging_set={"name": "pXRF 2026", "create": True},
+                  idempotency_key="my-batch-0001")                    # a retry replays
+result.summary, result.refused                # per-row outcomes; act on each remedy
+
+gx.write("DrillSample", [{"id": 123, "notes": "re-logged"}], intent="update")
+gx.retract("DrillSample", [{"id": 124}], dry_run=True)    # show the user what goes
+gx.retract("DrillSample", [{"id": 124}], confirm=True)    # only after their yes
+gx.undo(result.write_id)                       # reverse any write; .complete says if all of it
+gx.restore(retract_write_id)                   # bring a retract back
+for w in gx.writes(undone=False): ...          # what this key wrote, newest first
+```
+
+| Call | Does |
+|---|---|
+| `gx.describe(model)` | the live write contract for `model` |
+| `gx.write(model, rows, intent="create", logging_set=, idempotency_key=, dry_run=, acknowledge=)` | `create` never overwrites (a differing record is skipped, both values named) · `upsert` · `update` (existing records by identity or `id`; never creates). Returns a `WriteResult` |
+| `gx.validate(model, rows, …)` | the same call with `dry_run=True` |
+| `gx.retract(model, rows, confirm=False, dry_run=False)` | to the Trash with everything that belongs to them; needs `confirm=True` |
+| `gx.restore(write_id)` / `gx.restore(audit_batch_id=…)` | brings a removed batch back |
+| `gx.undo(write_id, dry_run=False)` | reverses one write; rows changed since are left and named (`undo_stale`) |
+| `gx.writes(write_id=None, model=, intent=, undone=)` | the key's write log (or one write, with its rows) |
+
+`logging_set=` is the body's `"set"`, for every set-aware family (sample sets
+too). `undo()` and `restore()` take `idempotency_key=` like `write()`.
+`result.raise_for_refusals()` raises `geodb.RowsRefused` (status 200, `.rows`)
+when rows were refused. `make_default_set` and `qaqc_verdict` have no methods
+on purpose — each is a person's own act on their explicit request (a vendor key
+is refused); send them through `gx.write(...)` with `dry_run=True`, then with
+`confirm=` after the user's yes (e.g. `gx.write(model, [],
+intent="make_default_set", logging_set="<set>", dry_run=True)`). `qc_reconnect`
+(model `"QCSample"`) goes through `gx.write(...)` too.
+
+The rules the server enforces (and an AI writing for a person must respect):
+coordinates carry their own `epsg` (never pre-convert; a row without it is
+refused `missing_crs`) · interval and sample rows name their set — when the
+user has not said which, **ask** (`set_required` lists the choices) · a vendor
+key writes only into sets it created or was given (`set_not_owned`) · update,
+upsert, retract and restore change what exists: dry-run, show the user, send
+after their yes. Hard delete never crosses the API.
 
 ## Development
 
