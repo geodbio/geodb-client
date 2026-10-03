@@ -136,4 +136,9 @@ class WriteResult:
 
     def __repr__(self):
         kind = "dry run" if self.dry_run else (self.intent or "write")
-        return f"<WriteResult {kind} {json.dumps(self.summary)} write_id={self.write_id}>"
+        refused = len(self.refused)
+        return (f"<WriteResult {kind} summary={json.dumps(self.summary)} "
+                f"write_id={self.write_id} rows={len(self.rows)}"
+                + (f" refused={refused}" if refused else "")
+                + " — per-row outcomes: .rows / .refused / .to_dataframe()"
+                + ("; reverse it: .undo()" if self.write_id else "") + ">")

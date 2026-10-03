@@ -39,10 +39,16 @@ for item in gx.stac().items("rasters"):
         cog.download("grid.tif")                     # short-SAS redirect, streamed
         break
 
-# Bulk lane — GeoParquet export (zero-data-loss geometry + native coordinates)
-job = gx.export("drill_samples", format="geoparquet", project=P)
+# Bulk lane — a WHOLE table is one file: the fastest way in (seconds, not pages)
+gx.export("assay_results", project=P).wait().download("values.parquet")  # every value, every flag
+job = gx.export("drill_samples", format="geoparquet", project=P)          # merged per the project
 job.wait().download("samples.parquet")
 ```
+
+Whole tables → `export()`. Filtered or modest reads → the list methods: once a
+list's first page states its total, the rest are fetched four pages at a time
+(`geodb.Client(..., parallel=1)` reads one at a time; `skip_count=True` asks the
+server not to count and follows `next`).
 
 That's it — a vendor integrates a customer's project in an afternoon.
 
@@ -109,7 +115,7 @@ through.
 | `gx.drill_surveys(project=…)` | `drill_surveys` | — | Downhole survey stations (depth, azimuth, dip) (`/drill-surveys/`) |
 | `gx.lithology(project=…)` | `drill_lithology` | `set=` | Downhole lithology intervals (`/drill-lithologies/`) |
 | `gx.alteration(project=…)` | `drill_alteration` | `set=` | Downhole alteration intervals (`/drill-alterations/`) |
-| `gx.samples(project=…)` | `drill_samples` | `set=` | Drill samples (+ merged assays) (`/drill-samples/`) |
+| `gx.samples(project=…)` | `drill_samples` | `set=` | Drill samples (the assay by id; expand="assay" for the record) (`/drill-samples/`) |
 | `gx.structures(project=…)` | `drill_structure_point`, `drill_structure_zone` | — | Structural measurements; point (a depth) vs zone (an interval) (`/drill-structures/`) |
 | `gx.mineralization(project=…)` | `drill_mineralization` | `set=` | Mineralization intervals + mineral percentages (`/drill-mineralizations/`) |
 | `gx.veins(project=…)` | `drill_veins` | `set=` | Vein intervals (type, width, mineral contents) (`/drill-veins/`) |
@@ -118,8 +124,8 @@ through.
 | `gx.custom_intervals(project=…)` | `drill_custom_intervals` | `set=` | User-defined intervals (TYPE IS DATA) (`/drill-custom-intervals/`) |
 | `gx.point_samples(project=…)` | `point_samples` | — | Surface / soil / rock-chip samples (`/point-samples/`) |
 | `gx.qc_samples(project=…)` | `qc_samples` | — | QA/QC (standards, blanks, duplicates) (`/qc-samples/`) |
-| `gx.assays(project=…)` | — | — | Assay results (merged into the sample exports; flat: assay_results()) (`/assays/`) |
-| `gx.surveys(project=…)` | `geophysical_surveys` | — | Geophysical surveys (metadata + WGS84 footprint) (`/geophysical-surveys/`) |
+| `gx.assays(project=…)` | `assay_results` | — | Assay results (flat table: assay_results(); every value: export("assay_results")) (`/assays/`) |
+| `gx.surveys(project=…)` | `geophysical_surveys` | — | GEOPHYSICAL surveys (metadata + WGS84 footprint) — downhole surveys are drill_surveys() (`/geophysical-surveys/`) |
 <!-- END:tables -->
 
 Asking to `export()` a model your project does not expose returns HTTP 400 with
@@ -132,7 +138,13 @@ An `export()` is not a raw table dump. It comes back the way the project is
 configured, the same as the project's own CSV/XLSX exports and its ODBC feed:
 
 - **Assay merge settings** — the sample exports carry merged assay columns per
-  the project's merge strategy and unit conversions (`include_assays=True`).
+  the project's merge strategy and unit conversions (`include_assays=True`):
+  one value per element, below-detection results substituted and over-range
+  results at their limit, NOT flagged (the file's `geodb` metadata says so). For
+  statistics, detection limits or flags, export `assay_results`: one row per
+  sample × element × method with `below_detection`, `above_det_limit`,
+  `detection_limit`, `upper_limit`, the withheld flags and the method /
+  certificate / laboratory names.
 - **Coordinate reference system** — coordinates honour the project's configured
   output CRS (`odbc_output_crs`), not a forced WGS84.
 - **Column configuration** — visibility, ordering and display-name overrides.
@@ -221,4 +233,4 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.2.0 (protocol 0.2).
+Apache-2.0. Version 0.2.1 (protocol 0.2).

@@ -23,7 +23,7 @@ from .errors import (
 )
 from .writes import WriteResult
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "Client", "PROTOCOL_VERSION", "ProtocolVersionMismatch",

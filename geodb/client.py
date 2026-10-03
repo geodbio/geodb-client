@@ -56,33 +56,85 @@ class Paginated:
     """A lazy iterator over a v2 LimitOffset endpoint.
 
     Iterate for records; call :meth:`to_dataframe` to pull everything into a
-    pandas DataFrame. Follows ``next`` links until the page set is exhausted.
+    pandas DataFrame. Pages come in ORDER. Once the first page says the total
+    (``count``), the rest are fetched ``parallel`` at a time (default 4) by
+    offset; ``parallel=1`` — or ``skip_count=True``, which asks the server not
+    to count — follows ``next`` one page at a time.
     """
 
-    def __init__(self, client, path, params=None, page_size=500):
+    def __init__(self, client, path, params=None, page_size=500, *, parallel=None):
         self._client = client
         self._path = path
         self._params = dict(params or {})
         self._params.setdefault("limit", page_size)
+        if self._params.get("skip_count") in (True, "1", "true", "True", 1):
+            self._params["skip_count"] = "1"
+        elif self._params.get("skip_count") in (False, None, "0", "false", 0):
+            self._params.pop("skip_count", None)
+        self._parallel = max(1, int(parallel if parallel is not None
+                                    else getattr(client, "parallel", 4)))
         self._count = None
+        #: The first page's envelope keys other than ``results`` (``withheld``,
+        #: ``limit_clamped``, …) — what the server said about the whole read.
+        self.envelope = {}
+
+    def _pages_by_offset(self, data):
+        """The pages after ``first`` when its total is known, fetched in
+        parallel and yielded in order; None when they cannot be (no count, no
+        next page, skip_count, parallel=1)."""
+        rows = data.get("results") or []
+        if (self._parallel < 2 or not data.get("next") or self._count is None
+                or "skip_count" in self._params or not rows):
+            return None
+        served = len(rows)
+        start = int(self._params.get("offset") or 0)
+        offsets = range(start + served, self._count, served)
+        if not offsets:
+            return None
+        from concurrent.futures import ThreadPoolExecutor
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+        # Each page is the server's own ``next`` link with its offset moved:
+        # every parameter the read sent rides along exactly as it would.
+        parts = urlsplit(data["next"])
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+
+        def page(offset):
+            link = urlunsplit(parts._replace(query=urlencode(
+                dict(query, limit=served, offset=offset))))
+            return self._client._get_url(link).get("results") or []
+
+        def pages():
+            with ThreadPoolExecutor(max_workers=self._parallel) as pool:
+                for result in pool.map(page, offsets):
+                    yield result
+        return pages()
 
     def __iter__(self):
         params = dict(self._params)
         url = self._client._url(self._path)
-        first = True
+        data = self._client._get_url(url, params=params)
+        if not isinstance(data, dict) or "results" not in data:
+            # non-paginated payload (shouldn't happen on v2 list endpoints)
+            for row in (data if isinstance(data, list) else [data]):
+                yield row
+            return
+        if data.get("count") is not None:
+            self._count = data["count"]       # the envelope's total, kept
+        self.envelope = {k: v for k, v in data.items() if k != "results"}
+        for row in data["results"]:
+            yield row
+        rest = self._pages_by_offset(data)
+        if rest is not None:
+            for rows in rest:
+                for row in rows:
+                    yield row
+            return
+        url = data.get("next")
         while url:
-            data = self._client._get_url(url, params=params if first else None)
-            if first and isinstance(data, dict) and data.get("count") is not None:
-                self._count = data["count"]       # the envelope's total, kept
-            first = False
-            if isinstance(data, dict) and "results" in data:
-                for row in data["results"]:
-                    yield row
-                url = data.get("next")
-            else:  # non-paginated payload (shouldn't happen on v2 list endpoints)
-                for row in (data if isinstance(data, list) else [data]):
-                    yield row
-                url = None
+            data = self._client._get_url(url)
+            for row in data.get("results") or []:
+                yield row
+            url = data.get("next")
 
     def to_dataframe(self):
         """Materialise all records into a :class:`pandas.DataFrame`."""
@@ -93,7 +145,8 @@ class Paginated:
         """Total matching records: the list envelope's ``count`` — no extra
         round trip once the rows were read; otherwise one ``limit=1`` page."""
         if self._count is None:
-            data = self._client._get(self._path, params={**self._params, "limit": 1})
+            params = {k: v for k, v in self._params.items() if k != "skip_count"}
+            data = self._client._get(self._path, params={**params, "limit": 1})
             self._count = data.get("count") if isinstance(data, dict) else None
         return self._count
 
@@ -228,16 +281,19 @@ class Client:
         api_prefix: path prefix for the v2 API (default ``/api/v2``; use ``/v2``
             behind the api.* subdomain rewrite).
         timeout: per-request timeout (seconds).
+        parallel: pages fetched at once when a list's total is known
+            (default 4; 1 reads one page at a time).
     """
 
     def __init__(self, token, base_url=_DEFAULT_BASE, *, auth_scheme="Grant",
                  api_prefix=_DEFAULT_PREFIX, timeout=_DEFAULT_TIMEOUT, session=None,
-                 check_protocol=True):
+                 check_protocol=True, parallel=4):
         if not token:
             raise ValueError("token is required")
         #: Compare the server's protocol version with :data:`PROTOCOL_VERSION`
         #: (once, on the first response that carries it).
         self.check_protocol = check_protocol
+        self.parallel = max(1, int(parallel))
         self.server_protocol_version = None
         self.base_url = base_url.rstrip("/")
         self.api_prefix = "/" + api_prefix.strip("/")
@@ -349,9 +405,13 @@ class Client:
         """The flat assay table — one row per sample × element × method, with
         the method, certificate and laboratory by id (join ``methods/``):
         ``gx.assay_results(project=12).to_dataframe()``. Takes the assay
-        list's filters."""
+        list's filters; pages of 2,000, fetched in parallel. For a WHOLE
+        project, ``gx.export("assay_results", project=12)`` is faster: one
+        file, every flag kept, with the method / certificate / laboratory
+        names."""
         return Paginated(self, "/assay-results/",
-                         read_params(filters, project=project, company=company, scope=scope))
+                         read_params(filters, project=project, company=company, scope=scope),
+                         page_size=2000)
 
     def methods(self, company=None, *, project=None, **filters):
         """The laboratory methods (a company-level table: name the company, or
@@ -496,10 +556,17 @@ class Client:
     def export(self, model, format="geoparquet", include_assays=True, *, project=None,
                company=None, scope=None, set=None):
         """Create a bulk export job of ONE project's table. Returns an
-        :class:`ExportJob` (call .wait()). ``project`` is needed when the key
-        reads several projects; ``set`` (id, name or ``"all"``) when the
-        table's project holds several sets of it. A parameter the export
-        cannot honour is refused, never answered with an empty file."""
+        :class:`ExportJob` (call .wait()). The fastest way to a whole table:
+        ``gx.export("assay_results", project=12).wait().download("a.parquet")``.
+        ``model`` names the table — ``"assay_results"`` is every assay value
+        (one row per sample × element × method, below-detection / over-range
+        / withheld flags and detection limits kept: the table for
+        statistics); ``"drill_samples"`` has the values MERGED per the
+        project's settings (one value per element, flags not kept). ``project``
+        is needed when the key reads several projects; ``set`` (id, name or
+        ``"all"``) when the table's project holds several sets of it. A
+        parameter the export cannot honour is refused, never answered with an
+        empty file."""
         body = {"model": model, "format": format, "include_assays": include_assays}
         body.update(read_params({}, project=project, company=company, scope=scope, set=set))
         resp = self._post("/exports/", json=body)
@@ -529,7 +596,7 @@ TABLES = (
     ("alteration", "/drill-alterations/", ("drill_alteration",), True,
      "Downhole alteration intervals"),
     ("samples", "/drill-samples/", ("drill_samples",), True,
-     "Drill samples (+ merged assays)"),
+     "Drill samples (the assay by id; expand=\"assay\" for the record)"),
     ("structures", "/drill-structures/", ("drill_structure_point", "drill_structure_zone"),
      False, "Structural measurements; point (a depth) vs zone (an interval)"),
     ("mineralization", "/drill-mineralizations/", ("drill_mineralization",), True,
@@ -545,25 +612,34 @@ TABLES = (
      "Surface / soil / rock-chip samples"),
     ("qc_samples", "/qc-samples/", ("qc_samples",), False,
      "QA/QC (standards, blanks, duplicates)"),
-    ("assays", "/assays/", (), False,
-     "Assay results (merged into the sample exports; flat: assay_results())"),
+    ("assays", "/assays/", ("assay_results",), False,
+     "Assay results (flat table: assay_results(); every value: export(\"assay_results\"))"),
     ("surveys", "/geophysical-surveys/", ("geophysical_surveys",), False,
-     "Geophysical surveys (metadata + WGS84 footprint)"),
+     "GEOPHYSICAL surveys (metadata + WGS84 footprint) — downhole surveys are "
+     "drill_surveys()"),
 )
 
 
+#: Lists the server pages at 2,000 rows for an access grant (protocol 0.3:
+#: assay-results/ and the lean drill-samples/ rows); every other list at 500.
+_PAGE_SIZE = {"/drill-samples/": 2000}
+
+
 def _list_method(name, path, sets, what):
+    page_size = _PAGE_SIZE.get(path, 500)
     if sets:
         def method(self, project=None, *, company=None, scope=None, set=None, **filters):
             return Paginated(self, path, read_params(
-                filters, project=project, company=company, scope=scope, set=set))
+                filters, project=project, company=company, scope=scope, set=set),
+                page_size=page_size)
         extra = (' When the project holds several sets of it, name one with '
                  '``set=<id or name>`` or read them all with ``set="all"`` (each row '
                  'says its ``set_id`` / ``set_name``).')
     else:
         def method(self, project=None, *, company=None, scope=None, **filters):
             return Paginated(self, path, read_params(
-                filters, project=project, company=company, scope=scope))
+                filters, project=project, company=company, scope=scope),
+                page_size=page_size)
         extra = ''
     method.__name__ = name
     method.__qualname__ = f"Client.{name}"
