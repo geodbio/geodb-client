@@ -241,11 +241,19 @@ class ExportJob:
         self.format = create_response.get("format")
         self.state = create_response.get("state", "queued")
         self._status_url = create_response.get("status_url")
+        #: The guide sections to read before reporting from this table
+        #: (``[{topic, section, url, why}]``; fetch one with
+        #: ``client.guide(topic, section)``) and what the file merged — both
+        #: from the job's status.
+        self.see_guide = []
+        self.notes = {}
 
     def status(self):
         """Current status dict (``state`` plus progress / download_url)."""
         data = self._client._get(f"/exports/{self.id}/", raw_status=True)
         self.state = data.get("state", self.state)
+        self.see_guide = data.get("see_guide") or self.see_guide
+        self.notes = data.get("notes") or self.notes
         return data
 
     def wait(self, poll_seconds=2.0, timeout=900):
@@ -546,6 +554,15 @@ class Client:
         if "undone" in filters and isinstance(filters["undone"], bool):
             filters["undone"] = "true" if filters["undone"] else "false"
         return Paginated(self, "/records/writes/", filters, page_size=50)
+
+    # ── The domain guide ───────────────────────────────────────────────────
+    def guide(self, topic=None, section=None):
+        """geoDB's domain guide: the topic index, a whole topic, or one
+        section (``gx.guide("assay-values", "below-detection")``) — what a
+        read's ``see_guide`` points at."""
+        if topic is None:
+            return self._get("/guide/")
+        return self._get(f"/guide/{topic}/" + (f"{section}/" if section else ""))
 
     # ── Assets lane ────────────────────────────────────────────────────────
     def stac(self):

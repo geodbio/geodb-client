@@ -143,3 +143,25 @@ def test_write_result_repr_shows_the_summary_and_how_to_read_rows():
     assert ".rows" in text and ".to_dataframe()" in text and ".undo()" in text
     dry = repr(WriteResult(None, {"dry_run": True, "summary": {"would_create": 2}, "rows": []}))
     assert dry.startswith("<WriteResult dry run") and ".undo()" not in dry
+
+
+def test_an_export_job_keeps_its_guide_pointers_and_notes():
+    pointer = {"topic": "assay-values", "section": "below-detection",
+               "url": "/api/v2/guide/assay-values/below-detection/", "why": "w"}
+
+    class S:
+        calls = []
+
+        def get(self, url, params=None, headers=None, timeout=None, **kw):
+            self.calls.append(url)
+            if url.endswith("/guide/assay-values/below-detection/"):
+                return Resp(200, {"id": "assay-values", "results": [{"id": "below-detection"}]})
+            return Resp(200, {"state": "done", "see_guide": [pointer], "notes": {"n": "x"}})
+
+        def post(self, url, json=None, headers=None, timeout=None):
+            return Resp(202, {"id": "j1", "state": "queued", "model": "assay_results"})
+
+    gx = geodb.Client(token="gdbg_t", base_url="http://t", session=S())
+    job = gx.export("assay_results", project=1).wait(poll_seconds=0)
+    assert job.see_guide == [pointer] and job.notes == {"n": "x"}
+    assert gx.guide("assay-values", "below-detection")["results"][0]["id"] == "below-detection"
