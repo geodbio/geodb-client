@@ -20,10 +20,32 @@ import time
 
 import requests
 
-from .errors import AuthError, NotFoundError, APIError, ExportError, WriteRefused, error_for
+from .errors import (AuthError, NotFoundError, APIError, ExportError, ProtocolVersionMismatch,
+                     WriteRefused, error_for)
 from .writes import WriteResult, rows_from
 
-__all__ = ["Client"]
+__all__ = ["Client", "PROTOCOL_VERSION", "client_requirement"]
+
+#: The protocol version this client was built for (geoDB's
+#: ``api/protocol_version.py``). Sent on every request and compared with the
+#: server's ``X-GeoDB-Protocol-Version``: a different major.minor raises
+#: :class:`ProtocolVersionMismatch` naming the install line.
+PROTOCOL_VERSION = "0.2.0"
+VERSION_HEADER = "X-GeoDB-Protocol-Version"
+
+
+def _minor(version):
+    try:
+        major, minor = (int(p) for p in str(version).split(".")[:2])
+        return major, minor
+    except (TypeError, ValueError):
+        return None
+
+
+def client_requirement(version):
+    """The geodb-client releases that speak protocol ``version``."""
+    major, minor = _minor(version)
+    return f"geodb-client>={major}.{minor},<{major}.{minor + 1}"
 
 _DEFAULT_TIMEOUT = 60
 _DEFAULT_BASE = "https://api.geodb.io"
@@ -209,9 +231,14 @@ class Client:
     """
 
     def __init__(self, token, base_url=_DEFAULT_BASE, *, auth_scheme="Grant",
-                 api_prefix=_DEFAULT_PREFIX, timeout=_DEFAULT_TIMEOUT, session=None):
+                 api_prefix=_DEFAULT_PREFIX, timeout=_DEFAULT_TIMEOUT, session=None,
+                 check_protocol=True):
         if not token:
             raise ValueError("token is required")
+        #: Compare the server's protocol version with :data:`PROTOCOL_VERSION`
+        #: (once, on the first response that carries it).
+        self.check_protocol = check_protocol
+        self.server_protocol_version = None
         self.base_url = base_url.rstrip("/")
         self.api_prefix = "/" + api_prefix.strip("/")
         self.timeout = timeout
@@ -223,7 +250,23 @@ class Client:
         return f"{self.base_url}{self.api_prefix}/{path.lstrip('/')}"
 
     def _headers(self):
-        return {"Authorization": self._auth_header, "Accept": "application/json"}
+        return {"Authorization": self._auth_header, "Accept": "application/json",
+                VERSION_HEADER: PROTOCOL_VERSION}
+
+    def _check_protocol(self, resp):
+        """Raise :class:`ProtocolVersionMismatch` when the server's protocol
+        major.minor differs from the one this client speaks. A response
+        without the header (an older server, a proxy page) is not judged."""
+        if not self.check_protocol or self.server_protocol_version is not None:
+            return
+        headers = getattr(resp, "headers", None) or {}
+        server = headers.get(VERSION_HEADER)
+        if not server:
+            return
+        self.server_protocol_version = server
+        if _minor(server) is not None and _minor(server) != _minor(PROTOCOL_VERSION):
+            raise ProtocolVersionMismatch(server, PROTOCOL_VERSION,
+                                          f'pip install "{client_requirement(server)}"')
 
     def _get(self, path, params=None, raw_status=False):
         return self._get_url(self._url(path), params=params, raw_status=raw_status)
@@ -231,11 +274,13 @@ class Client:
     def _get_url(self, url, params=None, raw_status=False):
         resp = self._session.get(url, params=params, headers=self._headers(),
                                  timeout=self.timeout)
+        self._check_protocol(resp)
         return self._handle(resp, raw_status=raw_status)
 
     def _post(self, path, json=None):
         resp = self._session.post(self._url(path), json=json,
                                   headers=self._headers(), timeout=self.timeout)
+        self._check_protocol(resp)
         return self._handle(resp)
 
     @staticmethod
@@ -328,6 +373,7 @@ class Client:
             headers["Idempotency-Key"] = str(idempotency_key)
         resp = self._session.post(self._url("/records/"), json=body, headers=headers,
                                   timeout=self.timeout)
+        self._check_protocol(resp)
         if resp.status_code == 401:
             self._handle(resp)
         if resp.status_code != 200:

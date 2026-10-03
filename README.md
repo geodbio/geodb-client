@@ -5,7 +5,7 @@ pull a mining-exploration project's drill, assay, geophysics, raster, and docume
 data as pandas DataFrames and files, over one authenticated, project-scoped API.
 
 ```bash
-pip install geodb-client            # + geopandas extra:  pip install "geodb-client[geo]"
+pip install "geodb-client>=0.2,<0.3"     # + geopandas extra: pip install "geodb-client[geo]>=0.2,<0.3"
 ```
 
 > **Integrating for the first time?** Read
@@ -67,6 +67,15 @@ Every refusal is a typed exception carrying the server's `reason_code` and
 (`InvalidRequest` for any other 400), `AuthError` (401) / `PermissionDenied`
 (403), `NotFoundError`, `Conflict`, `Throttled` (`.retry_after`). Match on
 `reason_code`; act on `remedy`.
+
+**Client and server versions are paired.** geodb-client is versioned in step
+with the protocol: 0.2.x speaks protocol 0.2. It sends the version it speaks
+(`X-GeoDB-Protocol-Version`) and checks the server's on the first response; a
+different major.minor raises `geodb.ProtocolVersionMismatch`, whose `.install`
+is the line that fetches the matching client (e.g.
+`pip install "geodb-client>=0.3,<0.4"`). Install with the range the server
+gives you — `pip install "geodb-client>=0.2,<0.3"` for protocol 0.2 — never
+unpinned. (`check_protocol=False` turns the check off.)
 
 First-party callers can use a Knox token instead:
 

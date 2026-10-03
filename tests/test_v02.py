@@ -128,3 +128,45 @@ def test_assay_results_is_the_flat_table():
     list(gx.assay_results(project=9))
     assert gx._session.calls[0][1].endswith("/api/v2/assay-results/")
     assert gx._session.calls[0][2]["project"] == 9
+
+
+# ── client/server version pairing ──────────────────────────────────────────
+def _versioned(version):
+    return lambda url, params: Resp(200, PAGE, headers={"X-GeoDB-Protocol-Version": version})
+
+
+def test_the_client_sends_the_protocol_version_it_speaks():
+    seen = {}
+
+    class Recording(Session):
+        def get(self, url, params=None, headers=None, timeout=None, **kw):
+            seen.update(headers or {})
+            return super().get(url, params=params, headers=headers, timeout=timeout, **kw)
+
+    gx = geodb.Client(token="gdbg_t", base_url="http://t", session=Recording(_versioned("0.2.0")))
+    list(gx.collars(project=1))
+    assert seen["X-GeoDB-Protocol-Version"] == geodb.PROTOCOL_VERSION
+
+
+def test_a_server_on_another_minor_is_a_clear_error_naming_the_install_line():
+    gx = client(_versioned("0.3.1"))
+    with pytest.raises(geodb.ProtocolVersionMismatch) as caught:
+        list(gx.collars(project=1))
+    err = caught.value
+    assert err.install == 'pip install "geodb-client>=0.3,<0.4"'
+    assert "0.3.1" in str(err) and geodb.PROTOCOL_VERSION in str(err)
+
+
+def test_the_same_minor_and_a_missing_header_pass():
+    list(client(_versioned("0.2.9")).collars(project=1))
+    list(client(lambda url, params: Resp(200, PAGE)).collars(project=1))
+
+
+def test_the_check_can_be_switched_off():
+    gx = geodb.Client(token="gdbg_t", base_url="http://t", session=Session(_versioned("0.3.0")),
+                      check_protocol=False)
+    list(gx.collars(project=1))
+
+
+def test_the_package_is_versioned_in_step_with_the_protocol():
+    assert geodb.__version__.split(".")[:2] == geodb.PROTOCOL_VERSION.split(".")[:2]

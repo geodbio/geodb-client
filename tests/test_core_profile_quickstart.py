@@ -162,7 +162,7 @@ class CoreProfileHandler(BaseHTTPRequestHandler):
                          "application/octet-stream" if body is not None
                          else "application/json")
         self.send_header("Content-Length", str(len(raw)))
-        self.send_header("X-GeoDB-Protocol-Version", "0.1.0")
+        self.send_header("X-GeoDB-Protocol-Version", geodb.PROTOCOL_VERSION)
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -203,7 +203,7 @@ class CoreProfileHandler(BaseHTTPRequestHandler):
             return self._send(200, self._envelope(ROWS_FOR_PATH.get(path, [])))
         if path == "/api/v2/grant-context/":
             return self._send(200, {"project": {"id": 7, "name": "Mock Project"},
-                                    "protocol_version": "0.1.0",
+                                    "protocol_version": geodb.PROTOCOL_VERSION,
                                     "read_only": True})
         if path == "/api/v2/stac/collections/rasters/items/":
             item = json.loads(json.dumps(STAC_ITEM))
@@ -328,6 +328,6 @@ def test_every_core_record_lane_the_client_exposes_is_served(core_only_server):
 def test_the_grant_context_is_the_cheapest_first_call(core_only_server):
     gx = geodb.Client(token="gdbg_mock", base_url=core_only_server)
     context = gx.project()
-    assert context["protocol_version"] == "0.1.0"
+    assert context["protocol_version"] == geodb.PROTOCOL_VERSION
     assert context["read_only"] is True
     assert CoreProfileHandler.refused == []

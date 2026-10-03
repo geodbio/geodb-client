@@ -39,6 +39,21 @@ class PermissionDenied(AuthError):
     ``remedy`` says what to do instead."""
 
 
+class ProtocolVersionMismatch(GeodbError):
+    """The server speaks a different protocol minor than this client was built
+    for (``X-GeoDB-Protocol-Version``). ``install`` is the line that fetches a
+    client that speaks the server's version."""
+
+    def __init__(self, server_version, client_version, install):
+        self.server_version = server_version
+        self.client_version = client_version
+        self.install = install
+        self.remedy = install
+        super().__init__(
+            f"This geodb-client speaks protocol {client_version}; the server speaks "
+            f"{server_version}. Install the matching client: {install}")
+
+
 class APIError(GeodbError):
     """The API returned an error status (the base of the typed ones below)."""
 

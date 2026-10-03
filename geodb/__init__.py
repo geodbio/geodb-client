@@ -15,18 +15,18 @@ geodb-client — the Python client for the geoDB Open Exploration Protocol.
 See https://github.com/geodbio/geodb-protocol for the protocol spec.
 """
 
-from .client import Client
+from .client import Client, PROTOCOL_VERSION
 from .errors import (
     GeodbError, AuthError, PermissionDenied, NotFoundError, APIError, InvalidRequest,
     ProjectRequired, CompanyRequired, SetChoiceRequired, Conflict, Throttled, ExportError,
-    WriteRefused, RowsRefused,
+    ProtocolVersionMismatch, WriteRefused, RowsRefused,
 )
 from .writes import WriteResult
 
 __version__ = "0.2.0"
 
 __all__ = [
-    "Client",
+    "Client", "PROTOCOL_VERSION", "ProtocolVersionMismatch",
     "GeodbError", "AuthError", "PermissionDenied", "NotFoundError", "APIError",
     "InvalidRequest", "ProjectRequired", "CompanyRequired", "SetChoiceRequired",
     "Conflict", "Throttled", "ExportError", "WriteRefused", "RowsRefused", "WriteResult",
