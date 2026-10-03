@@ -193,7 +193,10 @@ def test_export_error_state_raises():
 
 
 def test_version_exposed():
-    assert geodb.__version__ == "0.1.0"
+    import pathlib
+    import re
+    pyproject = (pathlib.Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert geodb.__version__ == re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
 
 
 # ── The drilling tables (records lane) ──────────────────────────────────────

@@ -21,13 +21,16 @@ pip install geodb-client            # + geopandas extra:  pip install "geodb-cli
 import geodb
 
 gx = geodb.Client(token="gdbg_...", base_url="https://api.geodb.io")
+gx.project()                                         # the companies + projects it reads
+P = 12                                               # name the project on every read
 
 # Records lane — relational data straight to pandas
-collars       = gx.collars().to_dataframe()
-samples       = gx.samples().to_dataframe()
-assays        = gx.assays().to_dataframe()
-point_samples = gx.point_samples().to_dataframe()
-surveys       = gx.surveys().to_dataframe()          # geophysical surveys + footprints
+collars       = gx.collars(project=P).to_dataframe()
+samples       = gx.samples(project=P).to_dataframe()
+results       = gx.assay_results(project=P).to_dataframe()   # flat: sample × element × method
+methods       = gx.methods(project=P).to_dataframe()         # join on method_id
+lithology     = gx.lithology(project=P, set="all").to_dataframe()  # or set=<id or name>
+surveys       = gx.surveys(project=P).to_dataframe() # geophysical surveys + footprints
 
 # Assets lane — walk the STAC catalog, download a Cloud-Optimized GeoTIFF
 for item in gx.stac().items("rasters"):
@@ -37,7 +40,7 @@ for item in gx.stac().items("rasters"):
         break
 
 # Bulk lane — GeoParquet export (zero-data-loss geometry + native coordinates)
-job = gx.export("drill_samples", format="geoparquet")
+job = gx.export("drill_samples", format="geoparquet", project=P)
 job.wait().download("samples.parquet")
 ```
 
@@ -45,11 +48,27 @@ That's it — a vendor integrates a customer's project in an afternoon.
 
 ## Auth
 
-A project owner mints a **project-pinned, read-only, revocable access grant** in
-geoDB (Project Settings → API Access Grants) and shares the token. The client
-sends it as `Authorization: Grant <token>`. Everything is scoped to that one
-project; every pull is logged for the owner to see. First-party callers can use a
-Knox token instead:
+A project owner mints a **revocable access grant** in geoDB (Project Settings →
+API Access Grants) and shares the token; it reads the project(s) it was given,
+and every pull is logged for the owner to see. The client sends it as
+`Authorization: Grant <token>`.
+
+**geoDB keeps no current project.** When the key reads several projects, name
+one on every read (`project=<id or exact name>`); otherwise the server answers
+`geodb.ProjectRequired`, whose `.choices` lists the projects by company.
+Company-level tables (`methods`, `laboratories`, standards, QC types) take
+`company=`; `scope="company", company=<id>` reads every project of one company.
+An interval table over a project with several sets raises
+`geodb.SetChoiceRequired` (`.sets` lists them) until you pass `set=<id or name>`
+or `set="all"`.
+
+Every refusal is a typed exception carrying the server's `reason_code` and
+`remedy`: `ProjectRequired`, `CompanyRequired`, `SetChoiceRequired`
+(`InvalidRequest` for any other 400), `AuthError` (401) / `PermissionDenied`
+(403), `NotFoundError`, `Conflict`, `Throttled` (`.retry_after`). Match on
+`reason_code`; act on `remedy`.
+
+First-party callers can use a Knox token instead:
 
 ```python
 gx = geodb.Client(token="<knox>", base_url="https://api.geodb.io", auth_scheme="Token")
@@ -61,10 +80,11 @@ Behind the `api.` subdomain rewrite, pass `api_prefix="/v2"`.
 
 | Call | Returns |
 |---|---|
-| **Records lane** — see the table list below | a `Paginated` iterator — iterate rows, or `.to_dataframe()`, or `.count()`. Accepts filter kwargs (e.g. `gx.surveys(method="magnetics")`, `gx.collars(modified_since="2024-01-01")`). |
+| **Records lane** — see the table list below | a `Paginated` iterator — iterate rows, or `.to_dataframe()`, or `.count()` (the list's own count; no extra request once read). Takes `project=`, `company=`, `scope=` (+ `set=` on interval tables) and filter kwargs (e.g. `gx.surveys(project=P, method="magnetics")`). |
+| `gx.assay_results(project=P)` · `gx.methods(company=C)` · `gx.laboratories(company=C)` | the flat assay table and the lookup tables it names by id. |
 | `gx.stac()` | a `StacCatalog`: `.landing()`, `.collections()`, `.items(collection_id)` (yields `StacItem`), `.item(cid, iid)`. `StacItem.asset(key).download(path)`. |
-| `gx.export(model, format="geoparquet", include_assays=True)` | an `ExportJob`: `.wait()` then `.download(path)`. Formats: `geoparquet`, `parquet`, `csv`. Models: the `export()` column below. |
-| `gx.project()` | the grant/project context. |
+| `gx.export(model, format="geoparquet", include_assays=True, project=…, set=…)` | an `ExportJob` of ONE project's table: `.wait()` then `.download(path)`. Formats: `geoparquet`, `parquet`, `csv`. Models: the `export()` column below. |
+| `gx.project()` | the credential's context: its companies and projects (with set counts), whether it may write, its limits. |
 | `gx.describe` · `gx.write` · `gx.validate` · `gx.retract` · `gx.restore` · `gx.undo` · `gx.writes` | the write half — see **Writing** below. |
 
 ### Tables
@@ -73,24 +93,25 @@ The drilling tables are the same ones geoDB serves to Leapfrog and Vulcan over
 ODBC — one definition of a project's drilling data, whichever door you come
 through.
 
-| Records lane | `export()` model | What it is |
-|---|---|---|
-| `gx.collars()` | `drill_collars` | Collar location, orientation, total depth |
-| `gx.drill_surveys()` | `drill_surveys` | Downhole survey stations (depth, azimuth, dip) |
-| `gx.lithology()` | `drill_lithology` | Downhole lithology intervals |
-| `gx.alteration()` | `drill_alteration` | Downhole alteration intervals |
-| `gx.samples()` | `drill_samples` | Drill samples (+ merged assays — see below) |
-| `gx.structures()` | `drill_structure_point`, `drill_structure_zone` | Structural measurements; point (a depth) vs zone (an interval) |
-| `gx.mineralization()` | `drill_mineralization` | Mineralization intervals + mineral percentages |
-| `gx.veins()` | `drill_veins` | Vein intervals (type, width, mineral contents) |
-| `gx.rqd()` | `drill_rqd` | Geotech: core recovery + rock mass |
-| — | `drill_rqd_core_recovery`, `drill_rqd_rock_mass` | The two halves, **only on projects that split their geotech tabs** |
-| `gx.spectral()` | `drill_spectral` | Spectral intervals (geounit abundances) |
-| `gx.custom_intervals()` | `drill_custom_intervals` | User-defined intervals (TYPE IS DATA) |
-| `gx.point_samples()` | `point_samples` | Surface / soil / rock-chip samples |
-| `gx.qc_samples()` | `qc_samples` | QA/QC (standards, blanks, duplicates) |
-| `gx.assays()` | — | Assay results (merged into the sample exports) |
-| `gx.surveys()` | `geophysical_surveys` | Geophysical surveys (metadata + WGS84 footprint) |
+<!-- BEGIN:tables (generated by scripts/gen_readme.py from geodb.client.TABLES) -->
+| Records lane | `export()` model | Sets | What it is |
+|---|---|---|---|
+| `gx.collars(project=…)` | `drill_collars` | — | Collar location, orientation, total depth (`/drill-collars/`) |
+| `gx.drill_surveys(project=…)` | `drill_surveys` | — | Downhole survey stations (depth, azimuth, dip) (`/drill-surveys/`) |
+| `gx.lithology(project=…)` | `drill_lithology` | `set=` | Downhole lithology intervals (`/drill-lithologies/`) |
+| `gx.alteration(project=…)` | `drill_alteration` | `set=` | Downhole alteration intervals (`/drill-alterations/`) |
+| `gx.samples(project=…)` | `drill_samples` | `set=` | Drill samples (+ merged assays) (`/drill-samples/`) |
+| `gx.structures(project=…)` | `drill_structure_point`, `drill_structure_zone` | — | Structural measurements; point (a depth) vs zone (an interval) (`/drill-structures/`) |
+| `gx.mineralization(project=…)` | `drill_mineralization` | `set=` | Mineralization intervals + mineral percentages (`/drill-mineralizations/`) |
+| `gx.veins(project=…)` | `drill_veins` | `set=` | Vein intervals (type, width, mineral contents) (`/drill-veins/`) |
+| `gx.rqd(project=…)` | `drill_rqd` | `set=` | Geotech: core recovery + rock mass (`/drill-rqds/`) |
+| `gx.spectral(project=…)` | `drill_spectral` | `set=` | Spectral intervals (geounit abundances) (`/drill-spectral-intervals/`) |
+| `gx.custom_intervals(project=…)` | `drill_custom_intervals` | `set=` | User-defined intervals (TYPE IS DATA) (`/drill-custom-intervals/`) |
+| `gx.point_samples(project=…)` | `point_samples` | — | Surface / soil / rock-chip samples (`/point-samples/`) |
+| `gx.qc_samples(project=…)` | `qc_samples` | — | QA/QC (standards, blanks, duplicates) (`/qc-samples/`) |
+| `gx.assays(project=…)` | — | — | Assay results (merged into the sample exports; flat: assay_results()) (`/assays/`) |
+| `gx.surveys(project=…)` | `geophysical_surveys` | — | Geophysical surveys (metadata + WGS84 footprint) (`/geophysical-surveys/`) |
+<!-- END:tables -->
 
 Asking to `export()` a model your project does not expose returns HTTP 400 with
 the list it does — e.g. the two `drill_rqd_*` halves appear only when the

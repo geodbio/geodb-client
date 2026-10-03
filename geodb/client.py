@@ -5,17 +5,22 @@ The geoDB Open Exploration Protocol Python client.
     gx = geodb.Client(token="gdbg_...", base_url="https://api.geodb.io")
     df = gx.collars().to_dataframe()
 
-One project per grant: a ``Client`` authenticates with a project-pinned,
-read-only access grant (``Authorization: Grant <token>``) and every call is
-scoped to that one project. Knox tokens work too (``auth_scheme="Token"``) for
-first-party use.
+A ``Client`` authenticates with an access grant (``Authorization: Grant
+<token>``) scoped to the project(s) it was given. geoDB keeps no current
+project between calls: when the key reads several, name one on every read —
+``gx.collars(project=12)`` — or the server answers ``ProjectRequired`` with the
+choices; ``company=`` names a company (the company-level tables), and
+``scope="company", company=…`` reads every project of one company. An interval
+table over a project with several sets answers ``SetChoiceRequired`` until you
+name one (``set=<id or name>``) or ask for all (``set="all"``). Knox tokens work
+too (``auth_scheme="Token"``) for first-party use.
 """
 
 import time
 
 import requests
 
-from .errors import AuthError, NotFoundError, APIError, ExportError, WriteRefused
+from .errors import AuthError, NotFoundError, APIError, ExportError, WriteRefused, error_for
 from .writes import WriteResult, rows_from
 
 __all__ = ["Client"]
@@ -37,6 +42,7 @@ class Paginated:
         self._path = path
         self._params = dict(params or {})
         self._params.setdefault("limit", page_size)
+        self._count = None
 
     def __iter__(self):
         params = dict(self._params)
@@ -44,6 +50,8 @@ class Paginated:
         first = True
         while url:
             data = self._client._get_url(url, params=params if first else None)
+            if first and isinstance(data, dict) and data.get("count") is not None:
+                self._count = data["count"]       # the envelope's total, kept
             first = False
             if isinstance(data, dict) and "results" in data:
                 for row in data["results"]:
@@ -60,9 +68,12 @@ class Paginated:
         return pd.DataFrame(list(self))
 
     def count(self):
-        """Total matching records (a single HEAD-ish page read)."""
-        data = self._client._get(self._path, params={**self._params, "limit": 1})
-        return data.get("count") if isinstance(data, dict) else None
+        """Total matching records: the list envelope's ``count`` — no extra
+        round trip once the rows were read; otherwise one ``limit=1`` page."""
+        if self._count is None:
+            data = self._client._get(self._path, params={**self._params, "limit": 1})
+            self._count = data.get("count") if isinstance(data, dict) else None
+        return self._count
 
 
 class Asset:
@@ -235,14 +246,6 @@ class Client:
             return None
 
     def _handle(self, resp, raw_status=False):
-        if resp.status_code in (401, 403):
-            body = self._body(resp)
-            code = body.get("reason_code") if isinstance(body, dict) else None
-            raise AuthError(f"Access denied ({resp.status_code}"
-                            + (f", {code}" if code else "")
-                            + "). Check the grant token and its project scope.")._keep(body)
-        if resp.status_code == 404:
-            raise NotFoundError(f"Not found: {resp.url}")._keep(self._body(resp))
         # Export status uses 202 (running) / 200 (done) / 500 (error) as signal.
         if raw_status and resp.status_code in (200, 202, 500):
             try:
@@ -250,7 +253,10 @@ class Client:
             except ValueError:
                 return {}
         if not resp.ok:
-            raise APIError(resp.status_code, resp.text[:300], resp.url)
+            # One exception class per kind of refusal, each carrying the
+            # server's reason_code + remedy (errors.error_for).
+            raise error_for(resp.status_code, self._body(resp), resp.url,
+                            text=resp.text[:300], headers=resp.headers)
         if resp.content:
             return resp.json()
         return {}
@@ -285,75 +291,30 @@ class Client:
 
     # ── Records lane ───────────────────────────────────────────────────────
     def project(self):
-        """The grant/project context for this client (dict)."""
+        """The credential's context (dict): its companies and projects (each
+        with its per-family set counts), whether it may write, its limits."""
         return self._get("/grant-context/")
 
-    def collars(self, **filters):
-        return Paginated(self, "/drill-collars/", filters)
+    grant_context = project
 
-    def samples(self, **filters):
-        return Paginated(self, "/drill-samples/", filters)
+    def assay_results(self, project=None, *, company=None, scope=None, **filters):
+        """The flat assay table — one row per sample × element × method, with
+        the method, certificate and laboratory by id (join ``methods/``):
+        ``gx.assay_results(project=12).to_dataframe()``. Takes the assay
+        list's filters."""
+        return Paginated(self, "/assay-results/",
+                         read_params(filters, project=project, company=company, scope=scope))
 
-    def assays(self, **filters):
-        return Paginated(self, "/assays/", filters)
+    def methods(self, company=None, *, project=None, **filters):
+        """The laboratory methods (a company-level table: name the company, or
+        a project to read its company's)."""
+        return Paginated(self, "/methods/",
+                         read_params(filters, project=project, company=company))
 
-    def point_samples(self, **filters):
-        return Paginated(self, "/point-samples/", filters)
-
-    def qc_samples(self, **filters):
-        """QA/QC samples (standards, blanks, duplicates)."""
-        return Paginated(self, "/qc-samples/", filters)
-
-    def surveys(self, **filters):
-        """Geophysical surveys (metadata + WGS84 footprint).
-
-        NOTE: geophysical, not downhole. Downhole survey stations (azimuth/dip
-        down the hole) are :meth:`drill_surveys`.
-        """
-        return Paginated(self, "/geophysical-surveys/", filters)
-
-    # ── The downhole interval tables ───────────────────────────────────────
-    # The same tables geoDB serves to Leapfrog and Vulcan over ODBC. Each is a
-    # depth interval (or a depth station) hung off a collar's `bhid`.
-
-    def drill_surveys(self, **filters):
-        """Downhole survey stations — depth_at, azimuth, dip."""
-        return Paginated(self, "/drill-surveys/", filters)
-
-    def lithology(self, **filters):
-        """Downhole lithology intervals."""
-        return Paginated(self, "/drill-lithologies/", filters)
-
-    def alteration(self, **filters):
-        """Downhole alteration intervals."""
-        return Paginated(self, "/drill-alterations/", filters)
-
-    def structures(self, **filters):
-        """Downhole structural measurements — point (depth_at only) and zone
-        (depth_from/depth_to) in one table; filter on the depth fields to split
-        them the way the exports do."""
-        return Paginated(self, "/drill-structures/", filters)
-
-    def mineralization(self, **filters):
-        """Downhole mineralization intervals (mineral percentages)."""
-        return Paginated(self, "/drill-mineralizations/", filters)
-
-    def veins(self, **filters):
-        """Downhole vein intervals (type, width, mineral contents)."""
-        return Paginated(self, "/drill-veins/", filters)
-
-    def rqd(self, **filters):
-        """Downhole geotech: core recovery + rock mass (RQD, Q-system, RMR)."""
-        return Paginated(self, "/drill-rqds/", filters)
-
-    def spectral(self, **filters):
-        """Downhole spectral intervals (geounit abundances)."""
-        return Paginated(self, "/drill-spectral-intervals/", filters)
-
-    def custom_intervals(self, **filters):
-        """User-defined downhole intervals. TYPE IS DATA: a categorical row
-        carries its value's name, a numeric row carries its measure."""
-        return Paginated(self, "/drill-custom-intervals/", filters)
+    def laboratories(self, company=None, *, project=None, **filters):
+        """The laboratories (a company-level table)."""
+        return Paginated(self, "/laboratories/",
+                         read_params(filters, project=project, company=company))
 
     # ── Writing (the ONE write endpoint) ───────────────────────────────────
     # Every write is POST /api/v2/records/ with {model, intent, records}; a
@@ -483,8 +444,86 @@ class Client:
         return StacCatalog(self)
 
     # ── Bulk lane ──────────────────────────────────────────────────────────
-    def export(self, model, format="geoparquet", include_assays=True):
-        """Create a bulk export job. Returns an :class:`ExportJob` (call .wait())."""
-        resp = self._post("/exports/", json={
-            "model": model, "format": format, "include_assays": include_assays})
+    def export(self, model, format="geoparquet", include_assays=True, *, project=None,
+               company=None, scope=None, set=None):
+        """Create a bulk export job of ONE project's table. Returns an
+        :class:`ExportJob` (call .wait()). ``project`` is needed when the key
+        reads several projects; ``set`` (id, name or ``"all"``) when the
+        table's project holds several sets of it. A parameter the export
+        cannot honour is refused, never answered with an empty file."""
+        body = {"model": model, "format": format, "include_assays": include_assays}
+        body.update(read_params({}, project=project, company=company, scope=scope, set=set))
+        resp = self._post("/exports/", json=body)
         return ExportJob(self, resp)
+
+
+def read_params(filters, *, project=None, company=None, scope=None, set=None):
+    """A read's query: the caller's filters plus the scope question (only
+    what was named — the server keeps no current project)."""
+    params = dict(filters)
+    for key, value in (("project", project), ("company", company),
+                       ("scope", scope), ("set", set)):
+        if value is not None:
+            params[key] = value
+    return params
+
+
+#: THE table registry: (method, path, export models, sets?, what it is). The
+#: list methods, the README's table and the contract test all read it.
+TABLES = (
+    ("collars", "/drill-collars/", ("drill_collars",), False,
+     "Collar location, orientation, total depth"),
+    ("drill_surveys", "/drill-surveys/", ("drill_surveys",), False,
+     "Downhole survey stations (depth, azimuth, dip)"),
+    ("lithology", "/drill-lithologies/", ("drill_lithology",), True,
+     "Downhole lithology intervals"),
+    ("alteration", "/drill-alterations/", ("drill_alteration",), True,
+     "Downhole alteration intervals"),
+    ("samples", "/drill-samples/", ("drill_samples",), True,
+     "Drill samples (+ merged assays)"),
+    ("structures", "/drill-structures/", ("drill_structure_point", "drill_structure_zone"),
+     False, "Structural measurements; point (a depth) vs zone (an interval)"),
+    ("mineralization", "/drill-mineralizations/", ("drill_mineralization",), True,
+     "Mineralization intervals + mineral percentages"),
+    ("veins", "/drill-veins/", ("drill_veins",), True,
+     "Vein intervals (type, width, mineral contents)"),
+    ("rqd", "/drill-rqds/", ("drill_rqd",), True, "Geotech: core recovery + rock mass"),
+    ("spectral", "/drill-spectral-intervals/", ("drill_spectral",), True,
+     "Spectral intervals (geounit abundances)"),
+    ("custom_intervals", "/drill-custom-intervals/", ("drill_custom_intervals",), True,
+     "User-defined intervals (TYPE IS DATA)"),
+    ("point_samples", "/point-samples/", ("point_samples",), False,
+     "Surface / soil / rock-chip samples"),
+    ("qc_samples", "/qc-samples/", ("qc_samples",), False,
+     "QA/QC (standards, blanks, duplicates)"),
+    ("assays", "/assays/", (), False,
+     "Assay results (merged into the sample exports; flat: assay_results())"),
+    ("surveys", "/geophysical-surveys/", ("geophysical_surveys",), False,
+     "Geophysical surveys (metadata + WGS84 footprint)"),
+)
+
+
+def _list_method(name, path, sets, what):
+    if sets:
+        def method(self, project=None, *, company=None, scope=None, set=None, **filters):
+            return Paginated(self, path, read_params(
+                filters, project=project, company=company, scope=scope, set=set))
+        extra = (' When the project holds several sets of it, name one with '
+                 '``set=<id or name>`` or read them all with ``set="all"`` (each row '
+                 'says its ``set_id`` / ``set_name``).')
+    else:
+        def method(self, project=None, *, company=None, scope=None, **filters):
+            return Paginated(self, path, read_params(
+                filters, project=project, company=company, scope=scope))
+        extra = ''
+    method.__name__ = name
+    method.__qualname__ = f"Client.{name}"
+    method.__doc__ = (f"{what} — ``GET /api/v2{path}``. ``project`` names the "
+                      f"project (needed when the key reads several); "
+                      f"``scope=\"company\", company=…`` reads one company's."
+                      + extra)
+    return method
+
+
+for _name, _path, _exports, _sets, _what in TABLES:
+    setattr(Client, _name, _list_method(_name, _path, _sets, _what))
