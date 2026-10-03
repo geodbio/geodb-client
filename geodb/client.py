@@ -30,7 +30,7 @@ __all__ = ["Client", "PROTOCOL_VERSION", "client_requirement"]
 #: ``api/protocol_version.py``). Sent on every request and compared with the
 #: server's ``X-GeoDB-Protocol-Version``: a different major.minor raises
 #: :class:`ProtocolVersionMismatch` naming the install line.
-PROTOCOL_VERSION = "0.2.0"
+PROTOCOL_VERSION = "0.3.0"
 VERSION_HEADER = "X-GeoDB-Protocol-Version"
 
 

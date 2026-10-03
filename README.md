@@ -5,7 +5,7 @@ pull a mining-exploration project's drill, assay, geophysics, raster, and docume
 data as pandas DataFrames and files, over one authenticated, project-scoped API.
 
 ```bash
-pip install "geodb-client>=0.2,<0.3"     # + geopandas extra: pip install "geodb-client[geo]>=0.2,<0.3"
+pip install "geodb-client>=0.3,<0.4"     # + geopandas extra: pip install "geodb-client[geo]>=0.3,<0.4"
 ```
 
 > **Integrating for the first time?** Read
@@ -75,12 +75,12 @@ Every refusal is a typed exception carrying the server's `reason_code` and
 `reason_code`; act on `remedy`.
 
 **Client and server versions are paired.** geodb-client is versioned in step
-with the protocol: 0.2.x speaks protocol 0.2. It sends the version it speaks
+with the protocol: 0.3.x speaks protocol 0.3 (0.2.x spoke 0.2). It sends the version it speaks
 (`X-GeoDB-Protocol-Version`) and checks the server's on the first response; a
 different major.minor raises `geodb.ProtocolVersionMismatch`, whose `.install`
 is the line that fetches the matching client (e.g.
-`pip install "geodb-client>=0.3,<0.4"`). Install with the range the server
-gives you — `pip install "geodb-client>=0.2,<0.3"` for protocol 0.2 — never
+`pip install "geodb-client>=0.4,<0.5"`). Install with the range the server
+gives you — `pip install "geodb-client>=0.3,<0.4"` for protocol 0.3 — never
 unpinned. (`check_protocol=False` turns the check off.)
 
 First-party callers can use a Knox token instead:
@@ -233,4 +233,4 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.2.1 (protocol 0.2).
+Apache-2.0. Version 0.3.0 (protocol 0.3).

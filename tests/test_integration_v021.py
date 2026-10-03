@@ -1,6 +1,6 @@
-"""0.2.1 against a live geoDB server (protocol v0.3): parallel paging returns the
+"""0.3.0 against a live geoDB server (protocol 0.3): parallel paging returns the
 same rows as one-page-at-a-time, the assay_results export round-trips with its
-flags, an over-cap limit is reported.
+flags, an over-cap limit is reported, a merged export says what it merged.
 
 Skipped unless GEODB_TEST_BASE_URL + GEODB_TEST_TOKEN are set (and, for a key
 reading several projects, GEODB_TEST_PROJECT).
@@ -60,3 +60,11 @@ def test_assay_results_export_round_trip(tmp_path):
     bdl = df[df["below_detection"]]
     assert bdl["value_numeric"].isna().all()
     assert len(df) == client().assay_results(project=PROJECT).count()
+
+
+def test_a_merged_csv_export_says_what_it_merged():
+    """Review S1: through the real server, not a mock — the job status carries
+    the merged table's notes whatever the format."""
+    job = client().export("drill_samples", format="csv", project=PROJECT).wait(poll_seconds=1)
+    assert "merged_values" in job.notes, job.notes
+    assert job.see_guide, "the export is read like its list"

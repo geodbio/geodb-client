@@ -143,29 +143,37 @@ def test_the_client_sends_the_protocol_version_it_speaks():
             seen.update(headers or {})
             return super().get(url, params=params, headers=headers, timeout=timeout, **kw)
 
-    gx = geodb.Client(token="gdbg_t", base_url="http://t", session=Recording(_versioned("0.2.0")))
+    gx = geodb.Client(token="gdbg_t", base_url="http://t", session=Recording(_versioned("0.3.0")))
     list(gx.collars(project=1))
     assert seen["X-GeoDB-Protocol-Version"] == geodb.PROTOCOL_VERSION
 
 
 def test_a_server_on_another_minor_is_a_clear_error_naming_the_install_line():
-    gx = client(_versioned("0.3.1"))
+    gx = client(_versioned("0.4.1"))
     with pytest.raises(geodb.ProtocolVersionMismatch) as caught:
         list(gx.collars(project=1))
     err = caught.value
-    assert err.install == 'pip install "geodb-client>=0.3,<0.4"'
-    assert "0.3.1" in str(err) and geodb.PROTOCOL_VERSION in str(err)
+    assert err.install == 'pip install "geodb-client>=0.4,<0.5"'
+    assert "0.4.1" in str(err) and geodb.PROTOCOL_VERSION in str(err)
     with pytest.raises(geodb.ProtocolVersionMismatch):
         list(gx.collars(project=1))      # raised again, never silently allowed
 
 
+def test_an_older_minor_server_names_its_own_install_line():
+    # 0.3 client, 0.2 server (a deploy not yet rolled out): the line that
+    # speaks THAT server, never a silent mismatch.
+    with pytest.raises(geodb.ProtocolVersionMismatch) as caught:
+        list(client(_versioned("0.2.0")).collars(project=1))
+    assert caught.value.install == 'pip install "geodb-client>=0.2,<0.3"'
+
+
 def test_the_same_minor_and_a_missing_header_pass():
-    list(client(_versioned("0.2.9")).collars(project=1))
+    list(client(_versioned("0.3.9")).collars(project=1))
     list(client(lambda url, params: Resp(200, PAGE)).collars(project=1))
 
 
 def test_the_check_can_be_switched_off():
-    gx = geodb.Client(token="gdbg_t", base_url="http://t", session=Session(_versioned("0.3.0")),
+    gx = geodb.Client(token="gdbg_t", base_url="http://t", session=Session(_versioned("0.4.0")),
                       check_protocol=False)
     list(gx.collars(project=1))
 
