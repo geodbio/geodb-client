@@ -221,4 +221,4 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.1.0.
+Apache-2.0. Version 0.2.0 (protocol 0.2).

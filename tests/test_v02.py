@@ -155,6 +155,8 @@ def test_a_server_on_another_minor_is_a_clear_error_naming_the_install_line():
     err = caught.value
     assert err.install == 'pip install "geodb-client>=0.3,<0.4"'
     assert "0.3.1" in str(err) and geodb.PROTOCOL_VERSION in str(err)
+    with pytest.raises(geodb.ProtocolVersionMismatch):
+        list(gx.collars(project=1))      # raised again, never silently allowed
 
 
 def test_the_same_minor_and_a_missing_header_pass():

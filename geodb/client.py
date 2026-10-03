@@ -257,13 +257,16 @@ class Client:
         """Raise :class:`ProtocolVersionMismatch` when the server's protocol
         major.minor differs from the one this client speaks. A response
         without the header (an older server, a proxy page) is not judged."""
-        if not self.check_protocol or self.server_protocol_version is not None:
+        if not self.check_protocol:
             return
-        headers = getattr(resp, "headers", None) or {}
-        server = headers.get(VERSION_HEADER)
-        if not server:
-            return
-        self.server_protocol_version = server
+        server = self.server_protocol_version
+        if server is None:
+            headers = getattr(resp, "headers", None) or {}
+            server = headers.get(VERSION_HEADER)
+            if not server:
+                return
+            self.server_protocol_version = server
+        # Raised on EVERY call once known (review #2 nit), never just the first.
         if _minor(server) is not None and _minor(server) != _minor(PROTOCOL_VERSION):
             raise ProtocolVersionMismatch(server, PROTOCOL_VERSION,
                                           f'pip install "{client_requirement(server)}"')
