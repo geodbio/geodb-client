@@ -439,7 +439,10 @@ class Client:
         list's filters; pages of 2,000, fetched in parallel. For a WHOLE
         project, ``gx.export("assay_results", project=12)`` is faster: one
         file, every flag kept, with the method / certificate / laboratory
-        names."""
+        names. ``element="Au"`` filters to one element. Assays whose sample
+        is in the Trash are withheld (the envelope's ``withheld``);
+        ``include_trashed_samples="true"`` returns them, marked. A row's
+        ``data_warnings`` flag a value outside its method's limits."""
         return Paginated(self, "/assay-results/",
                          read_params(filters, project=project, company=company, scope=scope),
                          page_size=2000)
@@ -671,7 +674,7 @@ class Client:
 
     # ── Bulk lane ──────────────────────────────────────────────────────────
     def export(self, model, format="geoparquet", include_assays=True, *, project=None,
-               company=None, scope=None, set=None):
+               company=None, scope=None, set=None, merge_settings_id=None):
         """Create a bulk export job of ONE project's table. Returns an
         :class:`ExportJob` (call .wait()). The fastest way to a whole table:
         ``gx.export("assay_results", project=12).wait().download("a.parquet")``.
@@ -679,13 +682,18 @@ class Client:
         (one row per sample × element × method, below-detection / over-range
         / withheld flags and detection limits kept: the table for
         statistics); ``"drill_samples"`` has the values MERGED per the
-        project's settings (one value per element, flags not kept). ``project``
+        project's settings (one value per element, flags not kept), or per
+        ``merge_settings_id`` — the job's answer states the settings applied
+        (``merge_settings``) and names any method / element pairs whose
+        below-detection results have no detection limit. ``project``
         is needed when the key reads several projects; ``set`` (id, name or
         ``"all"``) when the table's project holds several sets of it. A
         parameter the export cannot honour is refused, never answered with an
         empty file."""
         body = {"model": model, "format": format, "include_assays": include_assays}
         body.update(read_params({}, project=project, company=company, scope=scope, set=set))
+        if merge_settings_id is not None:
+            body["merge_settings_id"] = merge_settings_id
         resp = self._post("/exports/", json=body)
         return ExportJob(self, resp)
 

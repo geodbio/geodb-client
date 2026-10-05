@@ -58,3 +58,25 @@ def test_module_docstring_points_at_write_and_describe():
     import geodb.writes as w
     for word in ("layer", "describe", "undo"):
         assert word in w.__doc__
+
+
+def test_export_sends_merge_settings_id_only_when_given():
+    job = {"job_id": "j1", "status": "pending"}
+    gx, s = client(FakeResponse(202, job, url="http://t/api/v2/exports/"))
+    try:
+        gx.export("drill_samples", project=12, merge_settings_id=7)
+    except Exception:
+        pass
+    assert s.calls[0][2]["json"]["merge_settings_id"] == 7
+    gx, s = client(FakeResponse(202, job, url="http://t/api/v2/exports/"))
+    try:
+        gx.export("drill_samples", project=12)
+    except Exception:
+        pass
+    assert "merge_settings_id" not in s.calls[0][2]["json"]
+
+
+def test_docstrings_teach_the_v041_assay_reads():
+    from geodb.client import Client
+    assert "include_trashed_samples" in Client.assay_results.__doc__
+    assert "merge_settings" in Client.export.__doc__
