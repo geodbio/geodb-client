@@ -541,7 +541,12 @@ class Client:
           sent on existing ones. On a long-form record (an ``Assay``'s
           results, a method's limits, a standard's certified values) it ADDS a
           value the record lacks; overwriting a stored result needs
-          ``acknowledge=["replace_values"]``.
+          ``acknowledge=["replace_values"]``. Send a result as the lab wrote
+          it: a below-detection ``"<0.005"``, ``"BDL"``, ``"ND"`` or a negative
+          is stored as the sentinel -1 (the limit kept on the method); never
+          send 0 or half the limit. ``"N.D."`` / ``"N/D"`` is refused
+          ``ambiguous_nd``: ask the user (not detected → ``"BDL"``; not
+          determined → leave the value out).
         * ``"update"`` — changes the fields sent on EXISTING records (by
           identity or geoDB ``id``); never creates. ``"field": None`` empties a
           field. A unit correction on an ``Assay`` is ONE update naming the

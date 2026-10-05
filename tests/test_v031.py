@@ -80,3 +80,9 @@ def test_docstrings_teach_the_v041_assay_reads():
     from geodb.client import Client
     assert "include_trashed_samples" in Client.assay_results.__doc__
     assert "merge_settings" in Client.export.__doc__
+
+
+def test_write_docstring_teaches_below_detection():
+    doc = " ".join(Client.write.__doc__.split())
+    for word in ("BDL", "ambiguous_nd", "never send 0"):
+        assert word in doc, word
