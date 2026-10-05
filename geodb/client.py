@@ -525,8 +525,9 @@ class Client:
                 ``describe("VectorLayer")["layer"]`` lists the kinds). Each row
                 is one feature: ``geometry`` (WKT) in its ``epsg``, other keys
                 kept as its attributes. One write lands one new layer (a draft
-                unless ``activate`` — ask first); Undo removes it with its
-                features.
+                unless ``activate`` — ask first); the answer's ``layer`` gives
+                its id and where the draft can be read; Undo removes it with
+                its features.
 
         The intents (protocol 0.3, the v0.4 surface):
 
