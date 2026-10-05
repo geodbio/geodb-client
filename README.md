@@ -224,7 +224,10 @@ full list): `make_export_set` · `qaqc_verdict` · `qc_reconnect` · projects
 `confirm` its dry run returned) · reports (`Report` create / update / publish,
 `ReportSection` create / update / retract, `ReportFigure` create) · settings
 (`CustomFieldSchema`, `ColumnConfiguration`, `AssayMergeSettings`,
-`AssayRangeConfiguration`: create / update / retract / restore) · a map layer:
+`AssayRangeConfiguration`, `MetalEquivalentConfig`: create / update / retract /
+restore; `QAQCProtocol`: create / update; `QCConfiguration`, `ODBCSettings`:
+update — a change that moves QC verdicts sends the `confirm` its dry run
+returned) · a map layer:
 
 ```python
 features = [{"geometry": "LINESTRING (512300 4925100, 512800 4925600)", "epsg": 32611,

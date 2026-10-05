@@ -14,7 +14,8 @@ V04_INTENTS = ('create', 'upsert', 'update', 'retract', 'restore', 'make_default
 #: The record types a v0.4 write face adds beside the data models.
 V04_FACES = ('Project', 'Report', 'ReportSection', 'ReportFigure', 'CustomFieldSchema',
              'ColumnConfiguration', 'AssayMergeSettings', 'AssayRangeConfiguration',
-             'VectorLayer')
+             'VectorLayer', 'QAQCProtocol', 'QCConfiguration', 'MetalEquivalentConfig',
+             'ODBCSettings')
 
 
 def test_version_is_0_3_1():

@@ -565,10 +565,16 @@ class Client:
           ``"retract"``) and ``ReportFigure`` (``"create"``).
         * Settings — ``CustomFieldSchema`` (custom columns),
           ``ColumnConfiguration``, ``AssayMergeSettings``,
-          ``AssayRangeConfiguration``: ``"create"`` · ``"update"`` (children
-          edited through the parent, each ``{"action": "add"|"change"|
-          "remove", …}``) · ``"retract"`` · ``"restore"``. A person's own key
-          only; each answers its web page as ``url``.
+          ``AssayRangeConfiguration`` and ``MetalEquivalentConfig`` (price
+          decks): ``"create"`` · ``"update"`` (children edited through the
+          parent, each ``{"action": "add"|"change"|"remove", …}``) ·
+          ``"retract"`` · ``"restore"``; ``QAQCProtocol``: ``"create"`` ·
+          ``"update"``; ``QCConfiguration`` and ``ODBCSettings`` (the
+          project's own, one each): ``"update"``. A person's own key only,
+          with their permission for the area; each answers its web page as
+          ``url``. A change that moves QC verdicts answers its dry run with
+          ``verdicts`` and a ``confirm``: send that ``confirm=`` after the
+          user's yes.
         * ``VectorLayer`` — ``"create"`` with ``layer=`` (above).
 
         Coordinates carry their own ``epsg``, in the numbers you have; never
