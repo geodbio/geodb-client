@@ -30,7 +30,7 @@ __all__ = ["Client", "PROTOCOL_VERSION", "client_requirement"]
 #: ``api/protocol_version.py``). Sent on every request and compared with the
 #: server's ``X-GeoDB-Protocol-Version``: a different major.minor raises
 #: :class:`ProtocolVersionMismatch` naming the install line.
-PROTOCOL_VERSION = "0.3.0"
+PROTOCOL_VERSION = "0.3.1"
 VERSION_HEADER = "X-GeoDB-Protocol-Version"
 
 
@@ -483,38 +483,106 @@ class Client:
         return self._get(f"/records/describe/{model}/", params=params)
 
     def write(self, model, rows, intent="create", *, logging_set=None, project=None,
-              idempotency_key=None, dry_run=False, acknowledge=None, confirm=None):
+              idempotency_key=None, dry_run=False, acknowledge=None, confirm=None,
+              layer=None):
         """Write ``rows`` (a list of dicts or a DataFrame) through the one gate.
 
+        Every change to the user's geoDB is this ONE call (``POST /api/v2/
+        records/``), answered per row. Read the live contract first
+        (:meth:`describe`), dry-run (``dry_run=True`` or :meth:`validate`), then
+        send; every write that changed something returns a ``write_id`` that
+        :meth:`undo` reverses.
+
         Args:
-            model: e.g. ``"DrillCollar"``, ``"DrillSample"``, ``"DrillLithology"``
-                (``describe`` / ``project()["writes"]["models"]`` list them).
-            intent: ``"create"`` (never overwrites; an existing record with other
-                values is skipped and named), ``"upsert"``, or ``"update"``
-                (existing records only, by identity or geoDB ``id``). Upsert and
-                update change the user's data: dry-run first and ask the user.
+            model: the record type, e.g. ``"DrillCollar"``, ``"DrillSample"``,
+                ``"DrillLithology"``, ``"Assay"`` (``describe`` /
+                ``project()["writes"]["models"]`` list them), or one of the
+                faces below.
+            intent: what the write does (the intents below). Anything but
+                ``"create"`` and ``"undo"`` changes what exists: dry-run first,
+                tell the user exactly what will change, and send it only after
+                their yes.
             logging_set: the SET the rows belong to — sent as the body's
                 ``"set"``, for every set-aware family (lithology, alteration, …
                 and drill-sample sets alike): an existing set's name, or
                 ``{"name": "…", "create": True}`` for a new one. Required for
                 set-aware models; never guess it, ask the user.
+            project: the project the rows belong to (geoDB keeps no current
+                project; name it).
             idempotency_key: send one (e.g. a uuid you keep) to make a retry of
                 the same request safe: it replays the first answer.
             dry_run: True validates — the same per-row outcomes, nothing written.
-            acknowledge: e.g. ``["create_catalog_entries"]`` after asking the user.
+            acknowledge: consents the user gave, e.g.
+                ``["create_catalog_entries"]``, ``["replace_values"]``,
+                ``["crs_implausible"]`` (``describe`` lists them; ask first).
+            confirm: the value a dry run returned for an intent that needs one
+                (``"retract"`` for a retract; ``make_default_set``,
+                ``make_export_set``, ``qaqc_verdict``, ``publish`` and every
+                ``Project`` intent return their own).
+            layer: ``VectorLayer`` only — the layer the rows (its features)
+                land in: ``{"name": …, "kind": …}`` (optional
+                ``display_name``, ``attribution``, ``style``, ``activate``;
+                ``describe("VectorLayer")["layer"]`` lists the kinds). Each row
+                is one feature: ``geometry`` (WKT) in its ``epsg``, other keys
+                kept as its attributes. One write lands one new layer (a draft
+                unless ``activate`` — ask first); Undo removes it with its
+                features.
+
+        The intents (protocol 0.3, the v0.4 surface):
+
+        * ``"create"`` — adds records; an existing record with other values is
+          skipped and every differing field named (``conflicts``); never
+          overwrites.
+        * ``"upsert"`` — adds new records and overwrites exactly the fields
+          sent on existing ones. On a long-form record (an ``Assay``'s
+          results, a method's limits, a standard's certified values) it ADDS a
+          value the record lacks; overwriting a stored result needs
+          ``acknowledge=["replace_values"]``.
+        * ``"update"`` — changes the fields sent on EXISTING records (by
+          identity or geoDB ``id``); never creates. ``"field": None`` empties a
+          field. A unit correction on an ``Assay`` is ONE update naming the
+          ``certificate``, the ``element`` and the true ``unit``.
+        * ``"retract"`` — to the Trash with everything that belongs to them;
+          use :meth:`retract` (it sends ``confirm="retract"``).
+        * ``"restore"`` — a removed batch back; use :meth:`restore`.
+        * ``"make_default_set"`` / ``"make_export_set"`` — make a set what
+          everyone sees / what exports and ODBC read; a person's own key only.
+        * ``"qaqc_verdict"`` (model ``"Certificate"``) — approve, reject or
+          link a re-assay, ONLY on the user's explicit request.
+        * ``"qc_reconnect"`` (model ``"QCSample"``) — reconnect a QC sample
+          to its withdrawn result.
+        * ``"undo"`` — reverse one write by its ``write_id``; use :meth:`undo`.
+
+        The faces (the same call; ``describe(model)`` is each one's contract):
+
+        * ``Project`` (one per request): ``"create"`` (needs ``company``: ask
+          the user which) · ``"update"`` · ``"set_coordinate_system"`` ·
+          ``"set_state"`` · ``"retract"`` · ``"restore"``; each real request
+          sends the ``confirm`` its dry run returned.
+        * ``Report`` (``"create"`` · ``"update"`` · ``"publish"``, an informal
+          report only and only when asked), ``ReportSection`` (``"create"`` ·
+          ``"update"`` with the ``expected_revision`` you read ·
+          ``"retract"``) and ``ReportFigure`` (``"create"``).
+        * Settings — ``CustomFieldSchema`` (custom columns),
+          ``ColumnConfiguration``, ``AssayMergeSettings``,
+          ``AssayRangeConfiguration``: ``"create"`` · ``"update"`` (children
+          edited through the parent, each ``{"action": "add"|"change"|
+          "remove", …}``) · ``"retract"`` · ``"restore"``. A person's own key
+          only; each answers its web page as ``url``.
+        * ``VectorLayer`` — ``"create"`` with ``layer=`` (above).
 
         Coordinates carry their own ``epsg``, in the numbers you have; never
         pre-convert. Returns a :class:`WriteResult`.
 
-        ``make_default_set`` and ``qaqc_verdict`` have no methods of their own
-        on purpose: each changes what everyone on the project sees, runs only
-        through a PERSON's own key (a vendor key is always refused) and only on
-        their explicit request. Send them through this call with a dry run
-        first, then again with ``confirm=<the dry run's "confirm">`` after the
-        user's yes — e.g. ``write(model, [], intent="make_default_set",
-        logging_set="<set>", dry_run=True)``, or
-        ``write("Certificate", [{...}], intent="qaqc_verdict", dry_run=True)``.
-        ``qc_reconnect`` (model ``"QCSample"``) goes through here too.
+        ``make_default_set``, ``make_export_set``, ``qaqc_verdict`` and
+        ``qc_reconnect`` have no methods of their own on purpose: each changes
+        what everyone on the project sees, runs only through a PERSON's own key
+        (a vendor key is always refused) and only on their explicit request.
+        Send them through this call with a dry run first, then again with
+        ``confirm=<the dry run's "confirm">`` after the user's yes — e.g.
+        ``write(model, [], intent="make_default_set", logging_set="<set>",
+        dry_run=True)``, or ``write("Certificate", [{...}],
+        intent="qaqc_verdict", dry_run=True)``.
         """
         body = {"model": model, "intent": intent, "records": rows_from(rows),
                 "dry_run": bool(dry_run)}
@@ -526,6 +594,8 @@ class Client:
             body["acknowledge"] = list(acknowledge)
         if confirm is not None:
             body["confirm"] = confirm
+        if layer is not None:
+            body["layer"] = layer
         return self._records(body, idempotency_key)
 
     def validate(self, model, rows, intent="create", **kwargs):

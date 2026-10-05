@@ -200,7 +200,7 @@ for w in gx.writes(undone=False): ...          # what this key wrote, newest fir
 | Call | Does |
 |---|---|
 | `gx.describe(model)` | the live write contract for `model` |
-| `gx.write(model, rows, intent="create", logging_set=, idempotency_key=, dry_run=, acknowledge=)` | `create` never overwrites (a differing record is skipped, both values named) · `upsert` · `update` (existing records by identity or `id`; never creates). Returns a `WriteResult` |
+| `gx.write(model, rows, intent="create", logging_set=, project=, idempotency_key=, dry_run=, acknowledge=, confirm=, layer=)` | `create` never overwrites (a differing record is skipped, both values named) · `upsert` · `update` (existing records by identity or `id`; never creates) · every other intent (below). Returns a `WriteResult` |
 | `gx.validate(model, rows, …)` | the same call with `dry_run=True` |
 | `gx.retract(model, rows, confirm=False, dry_run=False)` | to the Trash with everything that belongs to them; needs `confirm=True` |
 | `gx.restore(write_id)` / `gx.restore(audit_batch_id=…)` | brings a removed batch back |
@@ -216,6 +216,22 @@ is refused); send them through `gx.write(...)` with `dry_run=True`, then with
 `confirm=` after the user's yes (e.g. `gx.write(model, [],
 intent="make_default_set", logging_set="<set>", dry_run=True)`). `qc_reconnect`
 (model `"QCSample"`) goes through `gx.write(...)` too.
+
+**Every intent and face goes through `gx.write`** (its docstring has the
+full list): `make_export_set` · `qaqc_verdict` · `qc_reconnect` · projects
+(`model="Project"`: `create` — ask the user which company — `update`,
+`set_coordinate_system`, `set_state`, `retract`, `restore`, each sent with the
+`confirm` its dry run returned) · reports (`Report` create / update / publish,
+`ReportSection` create / update / retract, `ReportFigure` create) · settings
+(`CustomFieldSchema`, `ColumnConfiguration`, `AssayMergeSettings`,
+`AssayRangeConfiguration`: create / update / retract / restore) · a map layer:
+
+```python
+features = [{"geometry": "LINESTRING (512300 4925100, 512800 4925600)", "epsg": 32611,
+             "fault": "F1"}]
+gx.write("VectorLayer", features, layer={"name": "Mapped faults", "kind": "geology_fault"},
+         project=12, dry_run=True)    # one write lands ONE new (draft) layer
+```
 
 The rules the server enforces (and an AI writing for a person must respect):
 coordinates carry their own `epsg` (never pre-convert; a row without it is
@@ -233,4 +249,4 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.0 (protocol 0.3).
+Apache-2.0. Version 0.3.1 (protocol 0.3).

@@ -8,6 +8,12 @@ Writing through the geoDB protocol's ONE write endpoint (``POST /api/v2/records/
     result.summary            # {'created': 5, 'refused': 0, …}
     result.refused            # rows the server refused, each with reason_code + remedy
     gx.undo(result.write_id)  # reverse it
+    gx.write("VectorLayer", features, layer={"name": "Faults", "kind": "geology_fault"},
+             project=12, dry_run=True)   # a map layer: one write = one new layer
+
+``describe(model)`` is each record type's live contract (fields, identity,
+sets, which intents need the user's yes); ``Client.write``'s docstring lists
+every intent and every face (projects, reports, settings, map layers).
 
 Every call answers per ROW: a bad row is refused with its own ``reason_code``
 and ``remedy`` while the rest of the batch lands — so a write returns a
