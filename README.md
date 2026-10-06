@@ -59,6 +59,11 @@ API Access Grants) and shares the token; it reads the project(s) it was given,
 and every pull is logged for the owner to see. The client sends it as
 `Authorization: Grant <token>`.
 
+An AI connected to geoDB (its connector at `https://api.geodb.io/mcp`) gets a
+1-hour **session key** (`gdbs_…`) from its `session_key` tool for code in its
+own sandbox; pass it as `token=` the same way. On a 401 `grant_expired`, ask
+for a new one.
+
 **geoDB keeps no current project.** When the key reads several projects, name
 one on every read (`project=<id or exact name>`); otherwise the server answers
 `geodb.ProjectRequired`, whose `.choices` lists the projects by company.
@@ -171,9 +176,11 @@ name.
 
 ## Writing (a key that may write records)
 
-> geoDB's write half is not yet served by its production servers; these calls
-> answer once it is. `gx.project()` says whether your key may write
-> (`read_only: false`).
+> Writing is live on geoDB's production servers and, for now, open to the AI
+> connections of geoDB staff and of members of companies in the geoDB protocol
+> beta (to join, contact geoDB: https://geodb.io/contact-us/). Any other key may
+> read; a write answers 403 `writes_staff_only`. `gx.project()` says whether
+> your key may write (`read_only: false`).
 
 Every write goes through ONE endpoint, `POST /api/v2/records/`, and is
 answered **per row**: a bad row comes back with its own `reason_code` and

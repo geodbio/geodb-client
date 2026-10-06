@@ -30,6 +30,7 @@ dev = ["pytest>=7", "responses>=0.23", "pyyaml>=6"]
 
 [project.urls]
 Homepage = "https://github.com/geodbio/geodb-protocol"
+Source = "https://github.com/geodbio/geodb-client"
 Protocol = "https://github.com/geodbio/geodb-protocol"
 Documentation = "https://github.com/geodbio/geodb-protocol/blob/main/AGENTS.md"
 
