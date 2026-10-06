@@ -543,7 +543,9 @@ class Client:
           value the record lacks; overwriting a stored result needs
           ``acknowledge=["replace_values"]``. Send a result as the lab wrote
           it: a below-detection ``"<0.005"``, ``"BDL"``, ``"ND"`` or a negative
-          is stored as the sentinel -1 (the limit kept on the method); never
+          is stored as the sentinel -1 (a write never stores a limit on the
+          method: the method's own limit, a floating method's per-sample
+          limit, or none, as the write says); never
           send 0 or half the limit. ``"N.D."`` / ``"N/D"`` is refused
           ``ambiguous_nd``: ask the user (not detected → ``"BDL"``; not
           determined → leave the value out).
@@ -589,15 +591,17 @@ class Client:
         Coordinates carry their own ``epsg``, in the numbers you have; never
         pre-convert. Returns a :class:`WriteResult`.
 
-        ``make_default_set``, ``make_export_set``, ``qaqc_verdict`` and
-        ``qc_reconnect`` have no methods of their own on purpose: each changes
-        what everyone on the project sees, runs only through a PERSON's own key
-        (a vendor key is always refused) and only on their explicit request.
-        Send them through this call with a dry run first, then again with
+        ``make_default_set``, ``make_export_set`` and ``qaqc_verdict`` have no
+        methods of their own on purpose: each changes what everyone on the
+        project sees, runs only through a PERSON's own key (a vendor key is
+        always refused) and only on their explicit request. Send them through
+        this call with a dry run first, then again with
         ``confirm=<the dry run's "confirm">`` after the user's yes — e.g.
         ``write(model, [], intent="make_default_set", logging_set="<set>",
         dry_run=True)``, or ``write("Certificate", [{...}],
-        intent="qaqc_verdict", dry_run=True)``.
+        intent="qaqc_verdict", dry_run=True)``. ``qc_reconnect`` (model
+        ``"QCSample"``) also goes through this call: dry-run it and ask first,
+        as for any change to existing records; it needs no confirm value.
         """
         body = {"model": model, "intent": intent, "records": rows_from(rows),
                 "dry_run": bool(dry_run)}
@@ -679,7 +683,8 @@ class Client:
 
     # ── Bulk lane ──────────────────────────────────────────────────────────
     def export(self, model, format="geoparquet", include_assays=True, *, project=None,
-               company=None, scope=None, set=None, merge_settings_id=None):
+               company=None, scope=None, set=None, merge_settings_id=None,
+               include_trashed_samples=None):
         """Create a bulk export job of ONE project's table. Returns an
         :class:`ExportJob` (call .wait()). The fastest way to a whole table:
         ``gx.export("assay_results", project=12).wait().download("a.parquet")``.
@@ -687,8 +692,10 @@ class Client:
         (one row per sample × element × method, below-detection / over-range
         / withheld flags and detection limits kept: the table for
         statistics); ``"drill_samples"`` has the values MERGED per the
-        project's settings (one value per element, flags not kept), or per
-        ``merge_settings_id`` — the job's answer states the settings applied
+        project's settings (one value per element, flags not kept — or one
+        column per method when the settings' ``merge_mode`` says so), or per
+        ``merge_settings_id`` (``drill_samples``, ``point_samples``,
+        ``qc_samples``) — the job's answer states the settings applied
         (``merge_settings``) and names any method / element pairs whose
         below-detection results have no detection limit. ``project``
         is needed when the key reads several projects; ``set`` (id, name or
@@ -699,6 +706,10 @@ class Client:
         body.update(read_params({}, project=project, company=company, scope=scope, set=set))
         if merge_settings_id is not None:
             body["merge_settings_id"] = merge_settings_id
+        if include_trashed_samples is not None:
+            # assay_results: assays whose sample is in the Trash are left out
+            # by default; True includes them, marked.
+            body["include_trashed_samples"] = bool(include_trashed_samples)
         resp = self._post("/exports/", json=body)
         return ExportJob(self, resp)
 

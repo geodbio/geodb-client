@@ -86,3 +86,25 @@ def test_write_docstring_teaches_below_detection():
     doc = " ".join(Client.write.__doc__.split())
     for word in ("BDL", "ambiguous_nd", "never send 0"):
         assert word in doc, word
+
+
+def test_export_sends_include_trashed_samples_only_when_given():
+    job = {"job_id": "j1", "status": "pending"}
+    gx, s = client(FakeResponse(202, job, url="http://t/api/v2/exports/"))
+    try:
+        gx.export("assay_results", project=12, include_trashed_samples=True)
+    except Exception:
+        pass
+    assert s.calls[0][2]["json"]["include_trashed_samples"] is True
+    gx, s = client(FakeResponse(202, job, url="http://t/api/v2/exports/"))
+    try:
+        gx.export("assay_results", project=12)
+    except Exception:
+        pass
+    assert "include_trashed_samples" not in s.calls[0][2]["json"]
+
+
+def test_qc_reconnect_is_not_said_to_need_a_person_key_confirm():
+    doc = " ".join(Client.write.__doc__.split())
+    assert "``qaqc_verdict`` and ``qc_reconnect`` have no methods" not in doc
+    assert "qc_samples" in " ".join(Client.export.__doc__.split())
