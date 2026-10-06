@@ -1,8 +1,9 @@
 # geodb-client
 
 The Python client for the **[geoDB Open Exploration Protocol](https://github.com/geodbio/geodb-protocol)** —
-pull a mining-exploration project's drill, assay, geophysics, raster, and document
-data as pandas DataFrames and files, over one authenticated, project-scoped API.
+read a mining-exploration project's drill, assay, QA/QC, geophysics, raster, and
+document data as pandas DataFrames and files, and write changes back through one gated
+endpoint (dry run first, per-row answers, undo), over one authenticated, project-scoped API.
 
 ```bash
 pip install "geodb-client>=0.3,<0.4"     # + geopandas extra: pip install "geodb-client[geo]>=0.3,<0.4"
@@ -55,8 +56,8 @@ That's it — a vendor integrates a customer's project in an afternoon.
 ## Auth
 
 A project owner mints a **revocable access grant** in geoDB (Project Settings →
-API Access Grants) and shares the token; it reads the project(s) it was given,
-and every pull is logged for the owner to see. The client sends it as
+API Access Grants) and shares the token; it reads the project(s) it was given
+(and writes, if the owner allowed it to), and every call is logged for the owner to see. The client sends it as
 `Authorization: Grant <token>`.
 
 An AI connected to geoDB (its connector at `https://api.geodb.io/mcp`) gets a
@@ -259,4 +260,4 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.1 (protocol 0.3).
+Apache-2.0. Version 0.3.2 (protocol 0.3).

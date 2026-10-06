@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geodb-client"
-version = "0.3.1"
-description = "Python client for the geoDB Open Exploration Protocol (drill, assay, geophysics, STAC, GeoParquet)."
+version = "0.3.2"
+description = "Python client for the geoDB Open Exploration Protocol: read and write mineral-exploration data (drill holes, assays, QA/QC, geophysics) as DataFrames, STAC and GeoParquet."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Aqua Terra Geoscientists / geoDB", email = "joshua@geodb.io" }]
-keywords = ["geodb", "mineral-exploration", "drillhole", "geophysics", "stac", "geoparquet"]
+keywords = ["geodb", "mineral-exploration", "mining", "drillhole", "assay", "qaqc", "geophysics", "stac", "geoparquet", "mcp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
