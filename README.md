@@ -252,6 +252,36 @@ key writes only into sets it created or was given (`set_not_owned`) · update,
 upsert, retract and restore change what exists: dry-run, show the user, send
 after their yes. Hard delete never crosses the API.
 
+## Uploading files (0.3.3; a key that acts as a person)
+
+The user's own connected AI may put FILES into the project — through the same upload doors the web
+and mobile apps use (the file is scanned before it is stored), with the user's own permissions:
+
+```python
+gx = geodb.Client(token=key)          # a session key from the connector, or an agent key
+
+r = gx.upload_document("Q3_summary.pdf", project=12, category="RP", title="Q3 summary")
+r.rows[0]["result"]["read"]            # 'documents/345/' — read it back with gx._get(...)
+gx.upload_photo("outcrop.jpg", project=12, category="GN", description="north face")
+
+box = gx.write("DrillPhoto", [{"bhid": "DH-7", "depth_from": 10, "depth_to": 13, "box_no": 3}])
+gx.attach_drill_box_image(box.rows[0]["id"], "DH-7_box3.jpg", project=12)
+
+gx.upload_project_file("pit_shell.glb", project=12, category="3D")   # rasters, DEMs, meshes …
+gx.undo(r.write_id)                    # every upload is undoable (it goes to the Trash)
+```
+
+- **Documents and photos** (at most 95 MiB each) are multipart POSTs to the API host — they work
+  from any sandbox that can reach `api.geodb.io`. The extension must match the bytes (a WebP named
+  `.jpg` is refused `file_type_mismatch`).
+- **Project files** (up to 5 GB) go in blocks **straight to storage**: `upload_start` returns
+  block URLs on the storage host, the client PUTs the bytes there (no key goes with them) and
+  `upload_commit` makes the record. A cloud sandbox limited to the API host cannot reach the
+  storage host: the client aborts and raises `StorageUnreachable` naming the fixes — run it from a
+  local agent (Claude Code / Cowork on your machine), allow the storage host (or "All domains") in
+  the sandbox's network settings, or upload in the geoDB web app.
+- A vendor or organisation key cannot upload (`person_key_required`).
+
 ## Development
 
 ```bash
@@ -260,4 +290,4 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.2 (protocol 0.3).
+Apache-2.0. Version 0.3.3 (protocol 0.3).

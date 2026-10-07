@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geodb-client"
-version = "0.3.2"
+version = "0.3.3"
 description = "Python client for the geoDB Open Exploration Protocol: read and write mineral-exploration data (drill holes, assays, QA/QC, geophysics) as DataFrames, STAC and GeoParquet."
 readme = "README.md"
 requires-python = ">=3.9"

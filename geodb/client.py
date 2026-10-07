@@ -22,6 +22,7 @@ import requests
 
 from .errors import (AuthError, NotFoundError, APIError, ExportError, ProtocolVersionMismatch,
                      WriteRefused, error_for)
+from .uploads import UploadsMixin
 from .writes import WriteResult, rows_from
 
 __all__ = ["Client", "PROTOCOL_VERSION", "client_requirement"]
@@ -30,7 +31,7 @@ __all__ = ["Client", "PROTOCOL_VERSION", "client_requirement"]
 #: ``api/protocol_version.py``). Sent on every request and compared with the
 #: server's ``X-GeoDB-Protocol-Version``: a different major.minor raises
 #: :class:`ProtocolVersionMismatch` naming the install line.
-PROTOCOL_VERSION = "0.3.1"
+PROTOCOL_VERSION = "0.3.3"
 VERSION_HEADER = "X-GeoDB-Protocol-Version"
 
 
@@ -302,7 +303,7 @@ class ExportJob:
         return self._client._download(url, path, chunk_size=chunk_size)
 
 
-class Client:
+class Client(UploadsMixin):
     """A grant-scoped geoDB protocol client.
 
     Args:
