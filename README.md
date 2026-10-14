@@ -281,6 +281,12 @@ gx.undo(r.write_id)                    # every upload is undoable (it goes to th
   local agent (Claude Code / Cowork on your machine), allow the storage host (or "All domains") in
   the sandbox's network settings, or upload in the geoDB web app.
 - A vendor or organisation key cannot upload (`person_key_required`).
+- **HTTP 200 does not mean it landed:** read `r.rows[0]["status"]` (or call
+  `r.raise_for_refusals()`), as for any write.
+- **Safe to retry (0.3.4):** each document / photo upload carries an `Idempotency-Key` (fresh per
+  call, or pass `idempotency_key=`). A dropped connection or a timeout at the network edge (a large
+  file can time out AFTER it landed) is re-sent under the same key, and the server answers with
+  the first upload's result instead of storing the file twice.
 
 ## Development
 
@@ -290,4 +296,4 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.3 (protocol 0.3).
+Apache-2.0. Version 0.3.4 (protocol 0.3).

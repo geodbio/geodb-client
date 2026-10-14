@@ -24,11 +24,20 @@ acts as a person (the user's own connected AI) and may write records.
 
 Every upload answers like a records write (a :class:`geodb.WriteResult`: one
 row, ``created`` or ``refused`` with ``reason_code`` + ``remedy``) and returns
-a ``write_id`` that ``undo`` reverses.
+a ``write_id`` that ``undo`` reverses. HTTP 200 does not mean it landed: read
+the row's ``status`` (or call ``result.raise_for_refusals()``).
+
+A document or photo upload carries an ``Idempotency-Key`` (a fresh one per
+call, or the ``idempotency_key`` you pass). When the connection drops or the
+network edge times out (a large file can time out AFTER it landed), the client
+re-sends with the SAME key, and the server answers with the first upload's
+result instead of storing the file twice (0.3.4).
 """
 
 import json
 import os
+import time
+import uuid
 
 __all__ = ["StorageUnreachable", "UploadsMixin"]
 
@@ -74,16 +83,52 @@ def _form(fields):
     return out
 
 
+#: Seconds to wait before each re-send of an interrupted upload (same key).
+_UPLOAD_RETRY_WAITS = (2, 5, 15)
+#: Answers that mean "the edge gave up", not "the server refused": the upload
+#: may have landed, so it is re-sent under the same key (a replay if it did).
+_EDGE_STATUSES = frozenset({502, 503, 504, 520, 522, 524})
+
+
+def _in_progress(resp):
+    """409 idempotency_in_progress: the first send is still being stored."""
+    if resp.status_code != 409:
+        return False
+    try:
+        return (resp.json() or {}).get("reason_code") == "idempotency_in_progress"
+    except ValueError:
+        return False
+
+
 class UploadsMixin:
     """The upload helpers of :class:`geodb.Client`."""
 
-    def _upload(self, path, fields, file_field, name, data):
+    def _upload(self, path, fields, file_field, name, data, idempotency_key=None):
+        import requests
         from .writes import WriteResult
         from .errors import WriteRefused
         headers = self._headers()          # requests sets the multipart Content-Type
-        resp = self._session.post(self._url(path), data=_form(fields),
-                                  files={file_field: (name, data)}, headers=headers,
-                                  timeout=self.timeout)
+        headers["Idempotency-Key"] = str(idempotency_key or f"upload-{uuid.uuid4()}")
+        waits = list(_UPLOAD_RETRY_WAITS)
+        while True:
+            try:
+                resp = self._session.post(self._url(path), data=_form(fields),
+                                          files={file_field: (name, data)}, headers=headers,
+                                          timeout=self.timeout)
+            except (requests.ConnectionError, requests.Timeout):
+                if not waits:
+                    raise
+                time.sleep(waits.pop(0))
+                continue
+            if (resp.status_code in _EDGE_STATUSES or _in_progress(resp)) and waits:
+                wait = waits.pop(0)
+                try:
+                    wait = max(wait, int(resp.headers.get("Retry-After") or 0))
+                except (TypeError, ValueError):
+                    pass
+                time.sleep(wait)
+                continue
+            break
         self._check_protocol(resp)
         if resp.status_code == 401:
             self._handle(resp)
@@ -93,7 +138,7 @@ class UploadsMixin:
 
     def upload_document(self, path_or_bytes, project, category, *, file_name=None,
                         title=None, author=None, date=None, description=None,
-                        dry_run=False):
+                        dry_run=False, idempotency_key=None):
         """Upload a document (PDF, Word, Excel, CSV, text, images, GPX/KML/KMZ,
         GeoPackage …; at most 95 MiB) to ``project``. ``category`` is the
         document type code (RP report, TR technical report, MM memo, MP map,
@@ -103,11 +148,12 @@ class UploadsMixin:
         return self._upload("/documents/", {
             "project": project, "category": category, "file_name": name, "title": title,
             "author": author, "date": date, "description": description,
-            "dry_run": True if dry_run else None}, "document", name, data)
+            "dry_run": True if dry_run else None}, "document", name, data,
+            idempotency_key)
 
     def upload_photo(self, path_or_bytes, project, category="GN", *, file_name=None,
                      description=None, latitude=None, longitude=None, elevation=None,
-                     direction=None, attach_to=None, dry_run=False):
+                     direction=None, attach_to=None, dry_run=False, idempotency_key=None):
         """Upload a photo (JPEG, PNG, TIFF, WebP, HEIC; at most 95 MiB) to
         ``project``. ``latitude``/``longitude`` are WGS84 degrees and override
         the file's own GPS. ``attach_to={"model": "DrillPhoto", "id": <box>}``
@@ -119,16 +165,18 @@ class UploadsMixin:
             "project": project, "category": category, "description": description,
             "latitude": latitude, "longitude": longitude, "elevation": elevation,
             "direction": direction, "attach_to": attach_to,
-            "dry_run": True if dry_run else None}, "image", name, data)
+            "dry_run": True if dry_run else None}, "image", name, data,
+            idempotency_key)
 
     def attach_drill_box_image(self, box_id, path_or_bytes, project, *, file_name=None,
-                               description=None, dry_run=False):
+                               description=None, dry_run=False, idempotency_key=None):
         """Upload an image and link it to the DrillPhoto (drill-box photo)
         record ``box_id`` — write the box record first (``write("DrillPhoto",
         …)``: bhid, depths, box_no), then attach each image."""
         return self.upload_photo(path_or_bytes, project, category="DH", file_name=file_name,
                                  description=description, dry_run=dry_run,
-                                 attach_to={"model": "DrillPhoto", "id": int(box_id)})
+                                 attach_to={"model": "DrillPhoto", "id": int(box_id)},
+                                 idempotency_key=idempotency_key)
 
     def upload_project_file(self, path, project, category=None, *, name=None,
                             description=None, epsg=None, dry_run=False):

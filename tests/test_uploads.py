@@ -148,3 +148,57 @@ def test_a_start_the_server_refused_is_returned_not_uploaded(tmp_path):
     result = gx.upload_project_file(f, project=12)
     assert result.refused[0]["reason_code"] == "file_type_not_allowed"
     assert len(s.calls) == 1
+
+
+# --- 0.3.4: an interrupted upload is re-sent under the SAME Idempotency-Key ---
+# A 78 MB upload hit a Cloudflare 524 AFTER it had landed (2026-10-14); a blind
+# retry would have stored it twice. The server replays a key's first answer.
+
+@pytest.fixture
+def no_wait(monkeypatch):
+    waits = []
+    monkeypatch.setattr("geodb.uploads.time.sleep", waits.append)
+    return waits
+
+
+def _doc(tmp_path):
+    pdf = tmp_path / "big.pdf"
+    pdf.write_bytes(b"%PDF-1.4 big")
+    return pdf
+
+
+def test_every_upload_carries_an_idempotency_key_fresh_per_call(tmp_path, no_wait):
+    gx, s = _client(FakeResponse(200, _row()), FakeResponse(200, _row()))
+    gx.upload_document(_doc(tmp_path), project=12, category="RP")
+    gx.upload_document(_doc(tmp_path), project=12, category="RP")
+    keys = [kw["headers"]["Idempotency-Key"] for _m, _u, kw in s.calls]
+    assert all(k.startswith("upload-") for k in keys)
+    assert keys[0] != keys[1]
+
+
+def test_an_edge_timeout_is_re_sent_under_the_same_key(tmp_path, no_wait):
+    gx, s = _client(FakeResponse(524, None), FakeResponse(200, _row(read="documents/9/")))
+    result = gx.upload_document(_doc(tmp_path), project=12, category="RP")
+    assert result.rows[0]["status"] == "created"
+    keys = {kw["headers"]["Idempotency-Key"] for _m, _u, kw in s.calls}
+    assert len(s.calls) == 2 and len(keys) == 1
+    assert no_wait == [2]
+
+
+def test_a_dropped_connection_is_re_sent_and_a_named_key_is_used(tmp_path, no_wait):
+    gx, s = _client(requests.ConnectionError("reset"), FakeResponse(200, _row()))
+    gx.upload_photo(_doc(tmp_path), project=12, idempotency_key="mine-1")
+    assert [kw["headers"]["Idempotency-Key"] for _m, _u, kw in s.calls] == ["mine-1", "mine-1"]
+
+
+def test_a_refusal_is_not_re_sent(tmp_path, no_wait):
+    gx, s = _client(FakeResponse(200, _row(status="refused")))
+    result = gx.upload_document(_doc(tmp_path), project=12, category="RP")
+    assert result.rows[0]["status"] == "refused" and len(s.calls) == 1 and no_wait == []
+
+
+def test_it_gives_up_after_the_last_wait(tmp_path, no_wait):
+    gx, s = _client(*[FakeResponse(524, None)] * 4)
+    with pytest.raises(geodb.WriteRefused):
+        gx.upload_document(_doc(tmp_path), project=12, category="RP")
+    assert len(s.calls) == 4 and no_wait == [2, 5, 15]
