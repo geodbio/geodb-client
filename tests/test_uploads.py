@@ -202,3 +202,42 @@ def test_it_gives_up_after_the_last_wait(tmp_path, no_wait):
     with pytest.raises(geodb.WriteRefused):
         gx.upload_document(_doc(tmp_path), project=12, category="RP")
     assert len(s.calls) == 4 and no_wait == [2, 5, 15]
+
+
+# --- 0.3.5: a certificate's own file beside its lab job (server W2b) ---------
+# The server's upload door: attach_to {"model": "Certificate", "id": N} as a JSON
+# string in the multipart form links the document to that certificate (same
+# project), and the category then defaults to CT (protocol/writes/upload_face.py).
+
+def test_upload_document_attaches_to_a_certificate_and_category_defaults_server_side():
+    gx, s = _client(FakeResponse(200, _row(read="documents/9/")))
+    gx.upload_document(b"%PDF-1.7", project=12, file_name="lab_certificate.pdf",
+                       attach_to={"model": "Certificate", "id": 412})
+    _m, url, kw = s.calls[0]
+    assert url == "http://t/api/v2/documents/"
+    assert json.loads(kw["data"]["attach_to"]) == {"model": "Certificate", "id": 412}
+    assert "category" not in kw["data"]          # the server gives it CT
+    assert kw["files"] == {"document": ("lab_certificate.pdf", b"%PDF-1.7")}
+
+
+def test_upload_document_attach_to_keeps_a_category_you_send():
+    gx, s = _client(FakeResponse(200, _row()))
+    gx.upload_document(b"a,b\n", project=12, category="QC", file_name="qc.csv",
+                       attach_to={"model": "Certificate", "id": 3}, dry_run=True)
+    data = s.calls[0][2]["data"]
+    assert data["category"] == "QC" and data["dry_run"] == "true"
+    assert json.loads(data["attach_to"]) == {"model": "Certificate", "id": 3}
+
+
+def test_upload_document_needs_a_category_unless_it_attaches():
+    gx, s = _client()
+    with pytest.raises(ValueError, match="category"):
+        gx.upload_document(b"%PDF", project=12, file_name="x.pdf")
+    assert s.calls == []
+
+
+def test_upload_document_keeps_category_positional():
+    gx, s = _client(FakeResponse(200, _row()))
+    gx.upload_document(b"%PDF", 12, "RP", file_name="r.pdf")
+    assert s.calls[0][2]["data"]["category"] == "RP"
+    assert "attach_to" not in s.calls[0][2]["data"]

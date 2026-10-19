@@ -290,6 +290,8 @@ gx = geodb.Client(token=key)          # a session key from the connector, or an 
 
 r = gx.upload_document("Q3_summary.pdf", project=12, category="RP", title="Q3 summary")
 r.rows[0]["result"]["read"]            # 'documents/345/' — read it back with gx._get(...)
+gx.upload_document("lab_certificate.pdf", project=12,       # the lab's file on its
+                   attach_to={"model": "Certificate", "id": 412})   # certificate (category CT)
 gx.upload_photo("outcrop.jpg", project=12, category="GN", description="north face")
 
 box = gx.write("DrillPhoto", [{"bhid": "DH-7", "depth_from": 10, "depth_to": 13, "box_no": 3}])
@@ -308,6 +310,10 @@ gx.undo(r.write_id)                    # every upload is undoable (it goes to th
   storage host: the client aborts and raises `StorageUnreachable` naming the fixes — run it from a
   local agent (Claude Code / Cowork on your machine), allow the storage host (or "All domains") in
   the sandbox's network settings, or upload in the geoDB web app.
+- **A certificate's own file (0.3.5):** `upload_document(..., attach_to={"model": "Certificate",
+  "id": <id>})` links the document to that certificate (same project) in the same request; the
+  category may be left out (the server gives it CT). Photos attach to a drill-box record the same
+  way (`attach_drill_box_image`).
 - A vendor or organisation key cannot upload (`person_key_required`).
 - **HTTP 200 does not mean it landed:** read `r.rows[0]["status"]` (or call
   `r.raise_for_refusals()`), as for any write.

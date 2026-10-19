@@ -5,6 +5,8 @@ acts as a person (the user's own connected AI) and may write records.
     gx = geodb.Client(token=…)                     # e.g. a session_key from the connector
     r = gx.upload_document("report.pdf", project=12, category="RP", title="Q3 summary")
     r.rows[0]["result"]["read"]                    # 'documents/345/' — read it back
+    gx.upload_document("lab_certificate.pdf", project=12,          # the lab's file,
+                       attach_to={"model": "Certificate", "id": 412})  # on its certificate
     gx.upload_photo("outcrop.jpg", project=12, category="GN")
     gx.attach_drill_box_image(box_id=88, path="DH-7_box3.jpg", project=12)
     gx.upload_project_file("pit_shell.glb", project=12, category="3D")
@@ -136,18 +138,26 @@ class UploadsMixin:
             raise WriteRefused(resp.status_code, self._body(resp), resp.url)
         return WriteResult(self, self._body(resp) or {})
 
-    def upload_document(self, path_or_bytes, project, category, *, file_name=None,
+    def upload_document(self, path_or_bytes, project, category=None, *, file_name=None,
                         title=None, author=None, date=None, description=None,
-                        dry_run=False, idempotency_key=None):
+                        attach_to=None, dry_run=False, idempotency_key=None):
         """Upload a document (PDF, Word, Excel, CSV, text, images, GPX/KML/KMZ,
         GeoPackage …; at most 95 MiB) to ``project``. ``category`` is the
         document type code (RP report, TR technical report, MM memo, MP map,
         CT certificate, PM permit, PR press release, QC, IM image, OT other …).
-        Read it back at ``result.rows[0]["result"]["read"]``."""
+        ``attach_to={"model": "Certificate", "id": <certificate id>}`` links
+        it to that certificate in the same project — the laboratory's own
+        file beside its job (0.3.5); the category then defaults to CT on the
+        server, so it may be left out. Without ``attach_to`` a category is
+        required. Read it back at ``result.rows[0]["result"]["read"]``."""
+        if category is None and attach_to is None:
+            raise ValueError("category is required (the document type code, e.g. 'RP'), "
+                             "unless attach_to names the certificate the file belongs to")
         name, data = _read(path_or_bytes, file_name)
         return self._upload("/documents/", {
             "project": project, "category": category, "file_name": name, "title": title,
             "author": author, "date": date, "description": description,
+            "attach_to": attach_to,
             "dry_run": True if dry_run else None}, "document", name, data,
             idempotency_key)
 
