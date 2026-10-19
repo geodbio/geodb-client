@@ -606,7 +606,8 @@ class Client(UploadsMixin):
         list's filters; pages of 2,000, fetched in parallel. For a WHOLE
         project, ``gx.export("assay_results", project=12)`` is faster: one
         file, every flag kept, with the method / certificate / laboratory
-        names. ``element="Au"`` filters to one element. Assays whose sample
+        names. ``element="Au"`` filters to one element; ``name=`` to the
+        samples named (one, or a list sent comma-joined). Assays whose sample
         is in the Trash are withheld (the envelope's ``withheld``);
         ``include_trashed_samples="true"`` returns them, marked. A row's
         ``data_warnings`` flag a value outside its method's limits."""
@@ -614,14 +615,33 @@ class Client(UploadsMixin):
                          read_params(filters, project=project, company=company, scope=scope),
                          page_size=2000)
 
+    def record_counts(self, project):
+        """How many records of each type ``project`` (id or exact name) holds
+        — ``GET /api/v2/record-counts/``, one small read to plan with before
+        any table is read: ``{"project", "counts": {type: {"live": n,
+        "in_trash": n}}, "company_wide", "in_trash_counted", "not_readable"}``.
+        ``in_trash`` is counted for a key acting as a person only; the
+        company-wide catalogs (laboratories, methods, standards) are counted
+        for the project's company and named in ``company_wide``; a type this
+        key cannot read is named in ``not_readable``. A type at 0 needs no
+        overlap check; a large one is read filtered (``name=`` / ``bhid=``),
+        never paged whole."""
+        return self._get("/record-counts/", params={"project": project})
+
     def methods(self, company=None, *, project=None, **filters):
         """The laboratory methods (a company-level table: name the company, or
-        a project to read its company's)."""
+        a project to read its company's), each with its elements, units and
+        detection limits — a reference table small enough to read whole.
+        ``include_trashed=True`` (a key acting as a person) also returns the
+        methods in the Trash, marked ``in_trash: true``: a name a trashed
+        method holds is refused on create — tell the user, offer restore."""
         return Paginated(self, "/methods/",
                          read_params(filters, project=project, company=company))
 
     def laboratories(self, company=None, *, project=None, **filters):
-        """The laboratories (a company-level table)."""
+        """The laboratories (a company-level table). ``include_trashed=True``
+        (a key acting as a person) also returns those in the Trash, marked
+        ``in_trash: true``."""
         return Paginated(self, "/laboratories/",
                          read_params(filters, project=project, company=company))
 
@@ -923,10 +943,33 @@ class Client(UploadsMixin):
                         break
 
 
+#: The list filters that take several values. The server reads ONE comma
+#: list (``name=A,B``); a repeated parameter would be read as its last value.
+_MULTI_VALUE_FILTERS = ("name", "bhid")
+#: (Module level: inside read_params ``set`` is the set= parameter.)
+_SEVERAL = (list, tuple, set, frozenset)
+
+#: The key filters, as every list's docstring states them.
+_KEY_FILTERS_DOC = (" ``name=`` / ``bhid=`` (on the lists that filter by them) take one "
+                    "value or several — a list, sent comma-joined: read only the records "
+                    "you need instead of paging the table.")
+_TRASH_DOC = (" ``include_trashed=True`` (a key acting as a person) also returns the "
+              "records in the Trash, each marked ``in_trash: true`` (a vendor key is "
+              "refused ``trash_needs_person_key``).")
+
+
 def read_params(filters, *, project=None, company=None, scope=None, set=None):
     """A read's query: the caller's filters plus the scope question (only
-    what was named — the server keeps no current project)."""
-    params = dict(filters)
+    what was named — the server keeps no current project). ``name`` /
+    ``bhid`` given as a list are sent comma-joined; a True / False filter is
+    sent as ``true`` / ``false``."""
+    params = {}
+    for key, value in filters.items():
+        if key in _MULTI_VALUE_FILTERS and isinstance(value, _SEVERAL):
+            value = ",".join(str(v) for v in value)
+        elif isinstance(value, bool):
+            value = "true" if value else "false"
+        params[key] = value
     for key, value in (("project", project), ("company", company),
                        ("scope", scope), ("set", set)):
         if value is not None:
@@ -970,6 +1013,10 @@ TABLES = (
 )
 
 
+#: The lists that take ``include_trashed`` (the server's reference reads,
+#: ``api/trash_read.TRASH_READ_MODELS``, that this client lists).
+_TRASH_READABLE = frozenset({"/drill-collars/", "/methods/", "/laboratories/"})
+
 #: Lists the server pages at 2,000 rows for an access grant (protocol 0.3:
 #: assay-results/ and the lean drill-samples/ rows); every other list at 500.
 _PAGE_SIZE = {"/drill-samples/": 2000}
@@ -996,7 +1043,8 @@ def _list_method(name, path, sets, what):
     method.__doc__ = (f"{what} — ``GET /api/v2{path}``. ``project`` names the "
                       f"project (needed when the key reads several); "
                       f"``scope=\"company\", company=…`` reads one company's."
-                      + extra)
+                      + extra + _KEY_FILTERS_DOC
+                      + (_TRASH_DOC if path in _TRASH_READABLE else ""))
     return method
 
 

@@ -47,7 +47,12 @@ job.wait(on_progress=lambda j: print(j.rows_done, "/", j.rows_total)).download("
 ```
 
 Whole tables for analysis → `export()`; to check what an import will do, dry-run
-the write (`validate`), never export. Filtered or modest reads → the list methods: once a
+the write (`validate`), never export. Plan with `gx.record_counts(project=P)`, then read
+only the records you need: `name=` / `bhid=` take one value or a list
+(`gx.samples(project=P, set="all", name=["DH-1-001", "DH-1-002"])`, sent comma-joined), and
+the reference lists (`methods`, `laboratories`, `collars`) take `include_trashed=True` (a key
+acting as a person: rows in the Trash come back marked `in_trash: true`; a vendor key is
+refused `trash_needs_person_key`). Filtered or modest reads → the list methods: once a
 list's first page states its total, the rest are fetched four pages at a time
 (`geodb.Client(..., parallel=1)` reads one at a time; `skip_count=True` asks the
 server not to count and follows `next`).
@@ -108,6 +113,7 @@ Behind the `api.` subdomain rewrite, pass `api_prefix="/v2"`.
 | `gx.stac()` | a `StacCatalog`: `.landing()`, `.collections()`, `.items(collection_id)` (yields `StacItem`), `.item(cid, iid)`. `StacItem.asset(key).download(path)`. |
 | `gx.export(model, format="geoparquet", include_assays=True, project=…, set=…)` | an `ExportJob` of ONE project's whole table, for analysis: `.wait()` then `.download(path)`. Formats: `geoparquet`, `parquet`, `csv`. Models: the `export()` column below. See **Waiting for an export**. |
 | `gx.project()` | the credential's context: its companies and projects (with set counts), whether it may write, its limits. |
+| `gx.record_counts(project=P)` | how many records of each type the project holds (`counts: {type: {live, in_trash}}`, `company_wide`, `not_readable`) — one small read to plan with before reading any table (0.3.5). |
 | `gx.describe` · `gx.write` · `gx.validate` · `gx.retract` · `gx.restore` · `gx.undo` · `gx.writes` | the write half — see **Writing** below. |
 
 ### Tables

@@ -79,3 +79,12 @@ def test_the_readme_table_is_generated_from_the_registry():
     gen = importlib.util.module_from_spec(spec_)
     spec_.loader.exec_module(gen)
     assert gen.stale() == "", "README.md is stale: run python scripts/gen_readme.py"
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "record-counts/ (server W2b) is published by the geodb-protocol regeneration that "
+    "follows its deploy; when this XPASSes, the spec has it: delete this marker"))
+def test_record_counts_is_a_published_read_taking_project(spec):
+    op = spec["paths"].get("/api/v2/record-counts/", {}).get("get")
+    assert op is not None, "the spec has no GET /api/v2/record-counts/"
+    assert "project" in {p.get("name") for p in op.get("parameters", [])}
