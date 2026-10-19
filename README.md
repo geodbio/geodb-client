@@ -40,13 +40,14 @@ for item in gx.stac().items("rasters"):
         cog.download("grid.tif")                     # short-SAS redirect, streamed
         break
 
-# Bulk lane — a WHOLE table is one file: the fastest way in (seconds, not pages)
+# Bulk lane — a WHOLE table for analysis is one file (never a way to check an import)
 gx.export("assay_results", project=P).wait().download("values.parquet")  # every value, every flag
 job = gx.export("drill_samples", format="geoparquet", project=P)          # merged per the project
-job.wait().download("samples.parquet")
+job.wait(on_progress=lambda j: print(j.rows_done, "/", j.rows_total)).download("samples.parquet")
 ```
 
-Whole tables → `export()`. Filtered or modest reads → the list methods: once a
+Whole tables for analysis → `export()`; to check what an import will do, dry-run
+the write (`validate`), never export. Filtered or modest reads → the list methods: once a
 list's first page states its total, the rest are fetched four pages at a time
 (`geodb.Client(..., parallel=1)` reads one at a time; `skip_count=True` asks the
 server not to count and follows `next`).
@@ -77,7 +78,8 @@ or `set="all"`.
 Every refusal is a typed exception carrying the server's `reason_code` and
 `remedy`: `ProjectRequired`, `CompanyRequired`, `SetChoiceRequired`
 (`InvalidRequest` for any other 400), `AuthError` (401) / `PermissionDenied`
-(403), `NotFoundError`, `Conflict`, `Throttled` (`.retry_after`). Match on
+(403), `NotFoundError`, `Conflict`, `Throttled` (`.retry_after`;
+`ExportConcurrency` for `export_concurrency`). Match on
 `reason_code`; act on `remedy`.
 
 **Client and server versions are paired.** geodb-client is versioned in step
@@ -104,7 +106,7 @@ Behind the `api.` subdomain rewrite, pass `api_prefix="/v2"`.
 | **Records lane** — see the table list below | a `Paginated` iterator — iterate rows, or `.to_dataframe()`, or `.count()` (the list's own count; no extra request once read). Takes `project=`, `company=`, `scope=` (+ `set=` on interval tables) and filter kwargs (e.g. `gx.surveys(project=P, method="magnetics")`). |
 | `gx.assay_results(project=P)` · `gx.methods(company=C)` · `gx.laboratories(company=C)` | the flat assay table and the lookup tables it names by id. |
 | `gx.stac()` | a `StacCatalog`: `.landing()`, `.collections()`, `.items(collection_id)` (yields `StacItem`), `.item(cid, iid)`. `StacItem.asset(key).download(path)`. |
-| `gx.export(model, format="geoparquet", include_assays=True, project=…, set=…)` | an `ExportJob` of ONE project's table: `.wait()` then `.download(path)`. Formats: `geoparquet`, `parquet`, `csv`. Models: the `export()` column below. |
+| `gx.export(model, format="geoparquet", include_assays=True, project=…, set=…)` | an `ExportJob` of ONE project's whole table, for analysis: `.wait()` then `.download(path)`. Formats: `geoparquet`, `parquet`, `csv`. Models: the `export()` column below. See **Waiting for an export**. |
 | `gx.project()` | the credential's context: its companies and projects (with set counts), whether it may write, its limits. |
 | `gx.describe` · `gx.write` · `gx.validate` · `gx.retract` · `gx.restore` · `gx.undo` · `gx.writes` | the write half — see **Writing** below. |
 
@@ -133,6 +135,32 @@ through.
 | `gx.assays(project=…)` | `assay_results` | — | Assay results (flat table: assay_results(); every value: export("assay_results")) (`/assays/`) |
 | `gx.surveys(project=…)` | `geophysical_surveys` | — | GEOPHYSICAL surveys (metadata + WGS84 footprint) — downhole surveys are drill_surveys() (`/geophysical-surveys/`) |
 <!-- END:tables -->
+
+### Waiting for an export (0.3.5)
+
+```python
+job = gx.export("assay_results", project=P)
+job.wait(on_progress=lambda j: print(j.state, j.progress_pct, j.rows_done, j.rows_total))
+job.download("values.parquet")
+```
+
+- **It polls when the server says.** Each "still building" answer (202) carries
+  `Retry-After`; the client waits that long (10 s when absent) — every poll counts
+  against the key's hourly rate. A throttled poll (429) waits its `Retry-After` too.
+- **Progress** — `state`, `progress_pct`, `rows_done`, `rows_total`,
+  `progress_message` — is on the job after every poll and handed to `on_progress`.
+- **It waits as long as the build moves.** `stall_timeout` (900 s) runs out only
+  when nothing changed for that long; `timeout` (3 h) is the hard cap.
+- **A full slot is not resent.** A key holds a few unfinished exports at most; on
+  429 `export_concurrency` the client waits, polls the exports IT started and creates
+  again once one has finished (`wait_for_slot=True`, `slot_timeout=1800`). Exports a
+  different session started cannot be polled from here: `geodb.ExportConcurrency`
+  (`.in_flight`, `.limit`, `.retry_after`).
+- **An interrupted build is created again once, out loud.** When the server says
+  the machine building it stopped ("create the export again"), `wait()` sends the
+  same request again ONCE, with a `RuntimeWarning` (`job.restarts`), then raises
+  `geodb.ExportInterrupted` (`.error_id` to quote). `restart_interrupted=0` raises
+  at once.
 
 Asking to `export()` a model your project does not expose returns HTTP 400 with
 the list it does — e.g. the two `drill_rqd_*` halves appear only when the

@@ -105,11 +105,28 @@ class Throttled(APIError):
     retry_after = None
 
 
+class ExportConcurrency(Throttled):
+    """429 ``export_concurrency``: this key already holds as many unfinished
+    export jobs as it may (``in_flight`` of ``limit``). Do NOT resend the
+    create: poll the jobs already started and create again once one finished
+    — :meth:`Client.export` does that for the jobs it started itself
+    (``wait_for_slot``)."""
+
+    @property
+    def in_flight(self):
+        return ((self.body or {}).get("offending") or {}).get("in_flight")
+
+    @property
+    def limit(self):
+        return ((self.body or {}).get("offending") or {}).get("limit")
+
+
 #: reason_code -> exception class; anything else by HTTP status.
 _BY_CODE = {
     "project_required": ProjectRequired,
     "company_required": CompanyRequired,
     "set_choice_required": SetChoiceRequired,
+    "export_concurrency": ExportConcurrency,
 }
 _BY_STATUS = {400: InvalidRequest, 401: AuthError, 403: PermissionDenied,
               404: NotFoundError, 409: Conflict, 429: Throttled}
@@ -145,6 +162,22 @@ def error_for(status_code, body, url=None, *, text="", headers=None):
 
 class ExportError(GeodbError):
     """An export job failed or timed out."""
+
+
+class ExportInterrupted(ExportError):
+    """The server reports the export's build was interrupted (the machine
+    building it stopped) and it will not finish: create the export again,
+    which starts a fresh build. ``ExportJob.wait`` already did so once
+    (``restart_interrupted``) before raising this. ``error_id`` is the id to
+    quote to geoDB; ``job_id`` the job that stopped."""
+
+    def __init__(self, job_id, message, error_id=None):
+        self.job_id = job_id
+        self.error_id = error_id
+        self.server_message = message
+        super().__init__(
+            f"Export {job_id} was interrupted on the server and will not finish: create the "
+            f"export again (gx.export(...) starts a fresh build). Server: {message}")
 
 
 class WriteRefused(APIError):

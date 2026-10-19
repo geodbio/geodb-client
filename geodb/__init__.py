@@ -23,6 +23,7 @@ from .client import Client, PROTOCOL_VERSION
 from .errors import (
     GeodbError, AuthError, PermissionDenied, NotFoundError, APIError, InvalidRequest,
     ProjectRequired, CompanyRequired, SetChoiceRequired, Conflict, Throttled, ExportError,
+    ExportConcurrency, ExportInterrupted,
     ProtocolVersionMismatch, WriteRefused, RowsRefused,
 )
 from .uploads import StorageUnreachable
@@ -34,7 +35,7 @@ __all__ = [
     "Client", "PROTOCOL_VERSION", "ProtocolVersionMismatch",
     "GeodbError", "AuthError", "PermissionDenied", "NotFoundError", "APIError",
     "InvalidRequest", "ProjectRequired", "CompanyRequired", "SetChoiceRequired",
-    "Conflict", "Throttled", "ExportError", "WriteRefused", "RowsRefused", "WriteResult",
+    "Conflict", "Throttled", "ExportError", "ExportConcurrency", "ExportInterrupted", "WriteRefused", "RowsRefused", "WriteResult",
     "StorageUnreachable",
     "__version__",
 ]

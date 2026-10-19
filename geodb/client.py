@@ -19,8 +19,9 @@ too (``auth_scheme="Token"``) for first-party use.
 import time
 
 from ._tls import new_session
-from .errors import (AuthError, NotFoundError, APIError, ExportError, ProtocolVersionMismatch,
-                     WriteRefused, error_for)
+from .errors import (AuthError, NotFoundError, APIError, ExportConcurrency, ExportError,
+                     ExportInterrupted, ProtocolVersionMismatch, Throttled, WriteRefused,
+                     error_for)
 from .uploads import UploadsMixin
 from .writes import WriteResult, rows_from
 
@@ -254,47 +255,184 @@ class StacCatalog:
         return StacItem(self._client, data)
 
 
-class ExportJob:
-    """A bulk export job — poll to completion, then download the artifact."""
+#: Seconds between status polls when a 202 carries no ``Retry-After`` (the
+#: server's own value is 10; every poll counts against the key's hourly rate).
+_POLL_FALLBACK_SECONDS = 10
+#: Seconds before re-asking for a slot when a 429 carries no ``Retry-After``.
+_SLOT_FALLBACK_SECONDS = 30
+_INFLIGHT = ("queued", "running")
 
-    def __init__(self, client, create_response):
+
+def _retry_after(headers):
+    try:
+        value = int((headers or {}).get("Retry-After"))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _interrupted(message):
+    """Whether an export's error says its build was interrupted (the server's
+    ``liveness.interrupted_error_message``: "… was interrupted. Create the
+    export again …")."""
+    return "interrupted" in (message or "").lower()
+
+
+def _error_id(message):
+    import re
+    match = re.search(r"error_id=([0-9A-Za-z_-]+)", message or "")
+    return match.group(1) if match else None
+
+
+class ExportJob:
+    """A bulk export job of one project's WHOLE table, for analysis — never to
+    check an import (the write's dry run answers that). Poll it to completion
+    with :meth:`wait`, then :meth:`download` the file.
+
+    While it builds, each status poll refreshes ``state``, ``progress_pct``,
+    ``rows_done``, ``rows_total``, ``progress_message`` and
+    ``elapsed_seconds`` on the job.
+    """
+
+    def __init__(self, client, create_response, create_body=None):
         self._client = client
-        self.id = create_response.get("id")
-        self.model = create_response.get("model")
-        self.format = create_response.get("format")
-        self.state = create_response.get("state", "queued")
-        self._status_url = create_response.get("status_url")
+        self._create_body = create_body
+        self.progress_pct = self.rows_done = self.rows_total = None
+        self.progress_message = None
+        self.elapsed_seconds = None
+        #: The server's ``Retry-After`` on the last 202 poll (seconds), if any.
+        self.retry_after = None
+        #: How many times :meth:`wait` created the export again after the
+        #: server reported its build interrupted, and the ``error_id`` of each.
+        self.restarts = 0
+        self.interrupted_error_ids = []
         #: The guide sections to read before reporting from this table
         #: (``[{topic, section, url, why}]``; fetch one with
         #: ``client.guide(topic, section)``) and what the file merged — both
         #: from the job's status.
         self.see_guide = []
         self.notes = {}
+        self._adopt(create_response)
+
+    def _adopt(self, create_response):
+        self.id = create_response.get("id")
+        self.model = create_response.get("model")
+        self.format = create_response.get("format")
+        self.state = create_response.get("state", "queued")
+        self.reused = create_response.get("reused")
+        self._status_url = create_response.get("status_url")
 
     def status(self):
-        """Current status dict (``state`` plus progress / download_url)."""
-        data = self._client._get(f"/exports/{self.id}/", raw_status=True)
+        """Current status dict (``state`` plus progress / download_url); the
+        job's own attributes are refreshed from it."""
+        data, headers = self._client._poll(f"/exports/{self.id}/")
         self.state = data.get("state", self.state)
+        for key in ("progress_pct", "rows_done", "rows_total", "progress_message",
+                    "elapsed_seconds"):
+            if key in data:
+                setattr(self, key, data[key])
+        self.retry_after = _retry_after(headers) if self.state in _INFLIGHT else None
         self.see_guide = data.get("see_guide") or self.see_guide
         self.notes = data.get("notes") or self.notes
         return data
 
-    def wait(self, poll_seconds=2.0, timeout=900):
-        """Block until the job is ``done`` (returns self) or raise on error/timeout."""
-        waited = 0.0
-        while waited <= timeout:
-            data = self.status()
-            state = data.get("state")
-            if state == "done":
-                self.state = "done"
-                if data.get("empty"):
-                    raise ExportError("Export contained no data.")
-                return self
-            if state == "error":
-                raise ExportError(data.get("error_message", "Export failed."))
-            time.sleep(poll_seconds)
-            waited += poll_seconds
-        raise ExportError(f"Export {self.id} did not finish within {timeout}s.")
+    def wait(self, poll_seconds=None, timeout=3 * 3600, *, stall_timeout=900,
+             on_progress=None, restart_interrupted=1):
+        """Block until the job is ``done`` (returns self), or raise.
+
+        Args:
+            poll_seconds: seconds between polls when the server names none.
+                Each 202 poll is followed after the server's ``Retry-After``
+                (10 s when absent); a smaller ``poll_seconds`` is raised to it.
+            timeout: the HARD cap on the whole wait (seconds, default 3 h).
+            stall_timeout: give up when NOTHING moved for this long (seconds,
+                default 900): any change in ``state``, ``rows_done``,
+                ``progress_pct`` or ``progress_message`` restarts the clock, so
+                a large table that keeps building is waited for.
+            on_progress: called with the job after every poll — read
+                ``job.state``, ``job.rows_done`` / ``job.rows_total``,
+                ``job.progress_pct``, ``job.progress_message``.
+            restart_interrupted: how many times to create the export again
+                when the server reports its build interrupted (the machine
+                building it stopped; the job will never finish). Default 1,
+                never silently: each restart warns (``RuntimeWarning``) and is
+                counted in ``job.restarts``; the job takes the new job's id.
+                Past it, :class:`geodb.ExportInterrupted` ("create the export
+                again"). 0 raises at the first interruption.
+
+        Raises :class:`geodb.ExportError` on a failed build, an empty export,
+        a stall or the hard cap. A 429 ``throttled`` poll waits its
+        ``Retry-After`` and polls again.
+        """
+        clock = time.monotonic
+        start = last_moved = clock()
+        last_seen = None
+        while True:
+            try:
+                data = self.status()
+            except Throttled as exc:
+                data = None
+                self._sleep(exc.retry_after if exc.retry_after is not None
+                            else _POLL_FALLBACK_SECONDS, start, timeout)
+            if data is not None:
+                state = data.get("state")
+                if on_progress is not None:
+                    on_progress(self)
+                if state == "done":
+                    self.state = "done"
+                    if data.get("empty"):
+                        raise ExportError("Export contained no data.")
+                    return self
+                if state == "error":
+                    message = data.get("error_message") or "Export failed."
+                    if not _interrupted(message):
+                        raise ExportError(message)
+                    self.interrupted_error_ids.append(_error_id(message))
+                    if self.restarts >= restart_interrupted or self._create_body is None:
+                        raise ExportInterrupted(self.id, message, _error_id(message))
+                    self._restart(message)
+                    last_moved, last_seen = clock(), None
+                    continue
+                seen = (state, self.rows_done, self.progress_pct, self.progress_message)
+                if seen != last_seen:
+                    last_seen, last_moved = seen, clock()
+            now = clock()
+            if now - start >= timeout:
+                raise ExportError(f"Export {self.id} did not finish within {timeout} s "
+                                  f"(state {self.state}, {self.rows_done} of "
+                                  f"{self.rows_total} rows).")
+            if now - last_moved >= stall_timeout:
+                raise ExportError(f"Export {self.id} made no progress for {stall_timeout} s "
+                                  f"(state {self.state}, {self.rows_done} of "
+                                  f"{self.rows_total} rows).")
+            if data is None:
+                continue
+            if poll_seconds is None:
+                wait = self.retry_after if self.retry_after is not None \
+                    else _POLL_FALLBACK_SECONDS
+            else:
+                wait = max(poll_seconds, self.retry_after or 0)
+            self._sleep(wait, start, timeout)
+
+    @staticmethod
+    def _sleep(seconds, start, timeout):
+        """Sleep ``seconds``, never past the hard cap."""
+        remaining = timeout - (time.monotonic() - start)
+        seconds = min(seconds, max(remaining, 0))
+        if seconds > 0:
+            time.sleep(seconds)
+
+    def _restart(self, message):
+        """Create the same export again and wait on the new job (one line of
+        warning: never a silent retry)."""
+        import warnings
+        old = self.id
+        warnings.warn(f"geodb-client: export {old} ({self.model}) was interrupted on the "
+                      f"server (error_id={_error_id(message)}); creating it again "
+                      f"(restart {self.restarts + 1}).", RuntimeWarning, stacklevel=3)
+        self._adopt(self._client._create_export(self._create_body))
+        self.restarts += 1
+        self.progress_pct = self.rows_done = self.progress_message = None
 
     def download(self, path, chunk_size=1 << 20):
         """Download the finished artifact (follows the short-SAS 302)."""
@@ -341,6 +479,9 @@ class Client(UploadsMixin):
             self._session, self.tls_trust = session, "caller"
         else:
             self._session, self.tls_trust = new_session(os_trust_store)
+        #: The exports this client started that had not finished when last
+        #: seen — what a 429 ``export_concurrency`` waits on.
+        self._export_jobs = []
 
     # ── HTTP core ──────────────────────────────────────────────────────────
     def _url(self, path):
@@ -376,6 +517,22 @@ class Client(UploadsMixin):
                                  timeout=self.timeout)
         self._check_protocol(resp)
         return self._handle(resp, raw_status=raw_status)
+
+    def _poll(self, path):
+        """``(body, headers)`` of a job status poll, whose status code is the
+        signal: 202 in flight, 200 done, 500 with ``state: error`` failed. Any
+        other refusal raises its typed exception (a 429 ``throttled`` too)."""
+        resp = self._session.get(self._url(path), headers=self._headers(),
+                                 timeout=self.timeout)
+        self._check_protocol(resp)
+        if resp.status_code in (200, 202, 500):
+            body = self._body(resp)
+            if isinstance(body, dict) and (resp.status_code != 500 or "state" in body):
+                return body, getattr(resp, "headers", None) or {}
+            if resp.status_code != 500:
+                return {}, getattr(resp, "headers", None) or {}
+        raise error_for(resp.status_code, self._body(resp), resp.url,
+                        text=resp.text[:300], headers=resp.headers)
 
     def _post(self, path, json=None):
         resp = self._session.post(self._url(path), json=json,
@@ -694,10 +851,23 @@ class Client(UploadsMixin):
     # ── Bulk lane ──────────────────────────────────────────────────────────
     def export(self, model, format="geoparquet", include_assays=True, *, project=None,
                company=None, scope=None, set=None, merge_settings_id=None,
-               include_trashed_samples=None):
-        """Create a bulk export job of ONE project's table. Returns an
-        :class:`ExportJob` (call .wait()). The fastest way to a whole table:
+               include_trashed_samples=None, wait_for_slot=True, slot_timeout=1800):
+        """Create a bulk export job of ONE project's WHOLE table, for ANALYSIS
+        (statistics, charts, models over the whole table) — never to check an
+        import: the write's dry run answers that (``validate``), and filtered
+        or modest reads page the lists (``name=``, ``bhid=``). Returns an
+        :class:`ExportJob`; ``.wait()`` follows the server's ``Retry-After``
+        and reports progress (``on_progress=``):
         ``gx.export("assay_results", project=12).wait().download("a.parquet")``.
+
+        A key holds at most a few unfinished exports. When the server answers
+        429 ``export_concurrency``, this call does NOT resend at once: with
+        ``wait_for_slot`` (default) it waits the ``Retry-After``, polls the
+        exports this client already started, and creates again once one has
+        finished (up to ``slot_timeout`` seconds). Exports started elsewhere
+        (another session on the same key) cannot be polled from here, so then
+        :class:`geodb.ExportConcurrency` is raised at once.
+
         ``model`` names the table — ``"assay_results"`` is every assay value
         (one row per sample × element × method, below-detection / over-range
         / withheld flags and detection limits kept: the table for
@@ -720,8 +890,37 @@ class Client(UploadsMixin):
             # assay_results: assays whose sample is in the Trash are left out
             # by default; True includes them, marked.
             body["include_trashed_samples"] = bool(include_trashed_samples)
-        resp = self._post("/exports/", json=body)
-        return ExportJob(self, resp)
+        job = ExportJob(self, self._create_export(body, wait_for_slot=wait_for_slot,
+                                                  slot_timeout=slot_timeout), body)
+        self._export_jobs = [j for j in self._export_jobs if j.state in _INFLIGHT] + [job]
+        return job
+
+    def _create_export(self, body, *, wait_for_slot=True, slot_timeout=1800):
+        """THE export create: ``POST exports/`` → the create answer. On 429
+        ``export_concurrency`` it never resends blindly: it polls this
+        client's own unfinished jobs (after each ``Retry-After``) and
+        resends only once one of them has finished."""
+        deadline = time.monotonic() + slot_timeout
+        while True:
+            try:
+                return self._post("/exports/", json=body)
+            except ExportConcurrency as exc:
+                mine = [j for j in self._export_jobs if j.state in _INFLIGHT]
+                if not wait_for_slot or not mine:
+                    raise
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise exc
+                    time.sleep(min(exc.retry_after if exc.retry_after is not None
+                                   else _SLOT_FALLBACK_SECONDS, remaining))
+                    for job in mine:
+                        try:
+                            job.status()
+                        except Throttled:
+                            pass
+                    if any(j.state not in _INFLIGHT for j in mine):
+                        break
 
 
 def read_params(filters, *, project=None, company=None, scope=None, set=None):
