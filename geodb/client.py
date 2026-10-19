@@ -854,6 +854,32 @@ class Client(UploadsMixin):
             filters["undone"] = "true" if filters["undone"] else "false"
         return Paginated(self, "/records/writes/", filters, page_size=50)
 
+    # ── TODO(W7b): the dataset dry run — NOT BUILT, no code on purpose ──────
+    # Build once the server endpoints exist (server plan
+    # protocol_import_efficiency_and_dataset_dry_run.md §6, W6; this client
+    # release is W7a). Read §6.1's shapes from the server at that time — the
+    # notes below are the design as of 2026-10-19, not a contract:
+    #   1. upload each member (one model per UTF-8 CSV, header = the gate
+    #      contract's landable fields) through upload_document(..., "OT") and
+    #      keep each document id;
+    #   2. rehearse: POST records/ {"model": "Dataset", "intent": "create" |
+    #      "upsert", "project": P, "dry_run": true, "dataset": {"members":
+    #      [{"document": id, "model": "Method", ...}, ...]}} — small datasets
+    #      answer inline; large ones answer {"dataset": {"id", "status",
+    #      "poll": "records/datasets/<id>/"}}: poll with Retry-After and
+    #      progress exactly as ExportJob.wait does (share that loop, never a
+    #      second poller);
+    #   3. show the user the per-member summary + exceptions + before_writing;
+    #   4. on their yes, send the answer's "write" body back VERBATIM (it names
+    #      the approved rehearsal + plan_token; any other key is refused) and
+    #      poll it the same way;
+    #   5. one Undo for the whole dataset: undo(write_id) — over the server's
+    #      size threshold it answers a poll handle.
+    # Expected surface: validate_dataset(members, project=, intent=) -> a
+    # DatasetPlan (summary, exceptions, detail download, .write() sending the
+    # verbatim body); WriteResult/undo unchanged. Unit tests on a mocked
+    # transport; a CSV writer for DataFrames that leaves empty cells empty.
+
     # ── The domain guide ───────────────────────────────────────────────────
     def guide(self, topic=None, section=None):
         """geoDB's domain guide: the topic index, a whole topic, or one

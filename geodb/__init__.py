@@ -29,7 +29,7 @@ from .errors import (
 from .uploads import StorageUnreachable
 from .writes import WriteResult
 
-__version__ = "0.3.4"
+__version__ = "0.3.5.dev0"
 
 __all__ = [
     "Client", "PROTOCOL_VERSION", "ProtocolVersionMismatch",

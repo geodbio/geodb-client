@@ -104,6 +104,14 @@ gx = geodb.Client(token="<knox>", base_url="https://api.geodb.io", auth_scheme="
 
 Behind the `api.` subdomain rewrite, pass `api_prefix="/v2"`.
 
+**TLS behind antivirus or a corporate proxy (0.3.5).** The client verifies HTTPS
+against the operating system's certificate store (`truststore`, Python 3.10+), so
+HTTPS-inspecting antivirus and corporate proxies whose root the OS trusts work
+without `CERTIFICATE_VERIFY_FAILED`. Only the client's own session is changed.
+Without truststore it uses certifi after one warning; `geodb.Client(...,
+os_trust_store=False)` opts out, and a `session=` you pass is used as it is
+(`gx.tls_trust` says `"os"`, `"certifi"` or `"caller"`).
+
 ## API
 
 | Call | Returns |
@@ -336,4 +344,6 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.4 (protocol 0.3).
+Apache-2.0. Version 0.3.5.dev0 (protocol 0.3) — unreleased: 0.3.5 adds OS-certificate-store TLS,
+exports that follow `Retry-After` with progress, a stall timeout and one loud restart,
+`record_counts`, several `name=` / `bhid=` values, `include_trashed`, and `upload_document(attach_to=)`.
