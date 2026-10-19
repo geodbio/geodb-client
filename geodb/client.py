@@ -18,8 +18,7 @@ too (``auth_scheme="Token"``) for first-party use.
 
 import time
 
-import requests
-
+from ._tls import new_session
 from .errors import (AuthError, NotFoundError, APIError, ExportError, ProtocolVersionMismatch,
                      WriteRefused, error_for)
 from .uploads import UploadsMixin
@@ -315,11 +314,18 @@ class Client(UploadsMixin):
         timeout: per-request timeout (seconds).
         parallel: pages fetched at once when a list's total is known
             (default 4; 1 reads one page at a time).
+        os_trust_store: verify TLS against the operating system's certificate
+            store (``truststore``; default True), so the client works behind
+            HTTPS-inspecting antivirus and corporate proxies. Without
+            truststore (Python 3.9, or not installed) it falls back to certifi
+            after one warning; ``False`` uses certifi. Only this client's own
+            session is changed (``tls_trust`` says ``"os"`` or ``"certifi"``);
+            a ``session=`` you pass is used as it is (``"caller"``).
     """
 
     def __init__(self, token, base_url=_DEFAULT_BASE, *, auth_scheme="Grant",
                  api_prefix=_DEFAULT_PREFIX, timeout=_DEFAULT_TIMEOUT, session=None,
-                 check_protocol=True, parallel=4):
+                 check_protocol=True, parallel=4, os_trust_store=True):
         if not token:
             raise ValueError("token is required")
         #: Compare the server's protocol version with :data:`PROTOCOL_VERSION`
@@ -331,7 +337,10 @@ class Client(UploadsMixin):
         self.api_prefix = "/" + api_prefix.strip("/")
         self.timeout = timeout
         self._auth_header = f"{auth_scheme} {token}"
-        self._session = session or requests.Session()
+        if session is not None:
+            self._session, self.tls_trust = session, "caller"
+        else:
+            self._session, self.tls_trust = new_session(os_trust_store)
 
     # ── HTTP core ──────────────────────────────────────────────────────────
     def _url(self, path):
