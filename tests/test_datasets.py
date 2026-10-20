@@ -866,12 +866,98 @@ def test_the_docstrings_teach_the_dry_run_is_the_authority_and_the_yes():
 def test_the_readme_dataset_table_is_generated_from_the_registry():
     import importlib.util
     import pathlib
-    from geodb.errors import DATASET_REASON_CODES
+    from geodb.errors import DATASET_REASON_CODES, RECORDS_REASON_CODES
     root = pathlib.Path(__file__).resolve().parents[1]
     spec_ = importlib.util.spec_from_file_location("gen_readme", root / "scripts" / "gen_readme.py")
     gen = importlib.util.module_from_spec(spec_)
     spec_.loader.exec_module(gen)
     assert gen.stale() == "", "README.md is stale: run python scripts/gen_readme.py"
     readme = (root / "README.md").read_text(encoding="utf-8")
-    for code, cls in DATASET_REASON_CODES.items():
+    for code, cls in {**DATASET_REASON_CODES, **RECORDS_REASON_CODES}.items():
         assert f"| `{code}` | `geodb.{cls.__name__}` |" in readme
+
+
+# ── W7d: writes_switched_off (503, a staff kill switch) ─────────────────────
+def switched_off(retry_after=None):
+    return Resp(503, {"reason_code": "writes_switched_off", "detail": "switched off",
+                      "remedy": "Send the same request again later."},
+                {"Retry-After": retry_after} if retry_after else {})
+
+
+def test_switched_off_without_retry_after_raises_at_once_never_a_loop(clock):
+    plan, s = _plan([switched_off()])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(geodb.WritesSwitchedOff) as caught:
+            plan.write(busy_retries=3)
+    assert caught.value.retry_after is None
+    assert clock.sleeps == [] and len(_records_kw(s)) == 2          # the rehearsal + one write
+
+
+def test_switched_off_with_retry_after_is_sent_again_once_at_most(clock):
+    plan, s = _plan([switched_off("40"), switched_off("40")])
+    with pytest.warns(RuntimeWarning, match="writes_switched_off"):
+        with pytest.raises(geodb.WritesSwitchedOff):
+            plan.write(busy_retries=3)
+    assert clock.sleeps == [40]                                       # ONE bounded re-send
+    first, second = _records_kw(s)[-2:]
+    assert first["json"] == second["json"] == WRITE_BODY
+
+
+def test_switched_off_then_back_on_lands(clock):
+    plan, _s = _plan([switched_off("40"), Resp(200, write_done())])
+    with pytest.warns(RuntimeWarning, match="writes_switched_off"):
+        done = plan.write()
+    assert done.status == "done"
+
+
+def test_switched_off_with_a_wait_past_the_ceiling_is_raised_never_slept(clock):
+    plan, _s = _plan([switched_off("3600")])
+    with pytest.raises(geodb.WritesSwitchedOff) as caught:
+        plan.write()
+    assert caught.value.retry_after == 3600 and clock.sleeps == []
+
+
+def test_switched_off_at_the_poll_raises_and_is_never_sent_again(clock):
+    ended = failed_at_poll("writes_switched_off")
+    ended._payload["status_code"] = 503
+    gx, s = _client(uploaded(812), queued(), ended)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(geodb.WritesSwitchedOff):
+            gx.validate_dataset(12, {"Method": METHODS})
+    assert len(_records_kw(s)) == 1 and clock.sleeps == []
+
+
+def test_a_write_stopped_by_the_switch_is_the_stop_answer_never_re_sent(clock):
+    plan, s = _plan([Resp(200, write_stopped("writes_switched_off"))])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        done = plan.write()
+    assert done.status == "stopped" and len(_records_kw(s)) == 2
+    with pytest.raises(geodb.WritesSwitchedOff):
+        done.raise_for_stop()
+
+
+# ── W7d: undo_needs_company_reach (403, never re-sent) ──────────────────────
+def company_reach():
+    return Resp(403, {"reason_code": "undo_needs_company_reach", "detail": "company-shared",
+                      "remedy": "Undo it through a key that reaches every project.",
+                      "offending": {"company_shared": ["Method"]}})
+
+
+def test_a_dataset_undo_that_needs_company_reach_raises_once(clock):
+    plan, s = _plan([Resp(200, write_done()), company_reach()])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(geodb.UndoNeedsCompanyReach) as caught:
+            plan.write().undo(busy_retries=3)
+    assert caught.value.offending == {"company_shared": ["Method"]}
+    assert len(_records_kw(s)) == 3 and clock.sleeps == []         # never re-sent
+
+
+def test_a_plain_undo_that_needs_company_reach_is_typed(clock):
+    gx, s = _client(company_reach())
+    with pytest.raises(geodb.UndoNeedsCompanyReach):
+        gx.undo("w-7")
+    assert len(_records_kw(s)) == 1

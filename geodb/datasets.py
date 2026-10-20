@@ -26,8 +26,8 @@ import uuid
 import warnings
 from decimal import Decimal
 
-from .errors import (DatasetInterrupted, DatasetJobFailed, WriteRefused, write_refused_for,
-                     _retry_after_header)
+from .errors import (DatasetInterrupted, DatasetJobFailed, WriteRefused, WritesSwitchedOff,
+                     write_refused_for, _retry_after_header)
 
 __all__ = ["DatasetJob", "DatasetPlan", "DatasetWrite", "DatasetsMixin", "member_csv",
            "ROUTES", "MEMBER_CATEGORY"]
@@ -80,6 +80,10 @@ _FALLBACK_SECONDS = {"dataset_project_busy": PROJECT_BUSY_FALLBACK_SECONDS,
 #: per HOUR, so its Retry-After can be most of an hour: past this, the refusal
 #: is raised with its ``retry_after`` and the caller decides (tell the user).
 MAX_RESEND_WAIT_SECONDS = 600
+#: ``writes_switched_off`` (503) is an operator's kill switch, not a busy
+#: wait: re-sent at most this many times, and only after a ``Retry-After`` the
+#: server named (never a fallback guess); otherwise raised at once.
+SWITCHED_OFF_RETRIES = 1
 
 
 # ── A member file: one model per UTF-8 CSV (server plan §6.2) ────────────────
@@ -753,7 +757,11 @@ class DatasetsMixin:
           times, out loud — never after a wait past
           :data:`MAX_RESEND_WAIT_SECONDS` (raised instead, with ``retry_after``);
         * ``dataset_interrupted`` (:data:`_RESTART_CODES`) is re-sent at once,
-          up to ``restart_interrupted`` times (default once), out loud.
+          up to ``restart_interrupted`` times (default once), out loud;
+        * ``writes_switched_off`` (a staff switch) is re-sent at most
+          :data:`SWITCHED_OFF_RETRIES` time, only after a ``Retry-After`` the
+          server named (within :data:`MAX_RESEND_WAIT_SECONDS`), out loud;
+          without one it is raised at once — never a loop.
 
         A re-send is ALWAYS the same body. Its Idempotency-Key follows the
         server's rule (``protocol/writes/idempotency.py``: only a 2xx is
@@ -763,7 +771,7 @@ class DatasetsMixin:
         answer the same finished job — so that re-send carries a new key."""
         from .client import _pause
         key = idempotency_key or f"dataset-{uuid.uuid4()}"
-        attempt = restarts = 0
+        attempt = restarts = switched = 0
         while True:
             resp = self._records_response(body, key, path=ROUTES["records"])
             data = self._body(resp)
@@ -790,6 +798,16 @@ class DatasetsMixin:
                               f"(error_id={exc.error_id}); sending the same request again "
                               f"(restart {restarts} of {restart_interrupted}).",
                               RuntimeWarning, stacklevel=3)
+            elif isinstance(exc, WritesSwitchedOff):
+                if switched >= SWITCHED_OFF_RETRIES or wait is None \
+                        or wait > MAX_RESEND_WAIT_SECONDS:
+                    raise exc
+                switched += 1
+                warnings.warn(f"geodb-client: the dataset request was refused "
+                              f"writes_switched_off (writes through AI connections are switched "
+                              f"off on the server); sending it again ONCE in {wait} s, as the "
+                              f"server's Retry-After says.", RuntimeWarning, stacklevel=3)
+                _pause(wait)
             elif exc.reason_code in _RETRY_CODES and attempt < busy_retries and (
                     wait is None or wait <= MAX_RESEND_WAIT_SECONDS):
                 attempt += 1

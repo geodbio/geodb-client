@@ -123,3 +123,44 @@ def test_a_429_on_the_records_door_is_write_throttled_with_its_wait():
     rate = errors.write_refused_for(429, {"reason_code": "throttled", "detail": "rate"}, "u")
     assert type(rate) is geodb.WriteThrottled and rate.retry_after is None
     assert rate.in_flight is None
+
+
+# ── W7d: the two records-door codes of server batch-C review (§6.18) ────────
+def test_writes_switched_off_is_its_own_503_never_a_dataset_code():
+    # The server's writes switch (an operator's, not the caller's) was thrown
+    # after the job was accepted: 503, retry "maybe".
+    exc = errors.write_refused_for(503, _body("writes_switched_off"), "u",
+                                   headers={"Retry-After": "120"})
+    assert type(exc) is geodb.WritesSwitchedOff
+    assert isinstance(exc, geodb.WriteRefused) and not isinstance(exc, geodb.DatasetRefused)
+    assert exc.status_code == 503 and exc.retry_after == 120
+    assert errors.write_refused_for(503, _body("writes_switched_off"), "u").retry_after is None
+    text = str(exc)
+    assert "switched off" in text and "nothing more was written" in text.lower()
+
+
+def test_undo_needs_company_reach_is_a_forbidden_write_that_says_where_to_undo():
+    exc = errors.write_refused_for(403, _body("undo_needs_company_reach",
+                                              company_shared=["Method"]), "u")
+    assert type(exc) is geodb.UndoNeedsCompanyReach
+    assert isinstance(exc, geodb.WriteRefused)              # existing except clauses
+    assert isinstance(exc, geodb.PermissionDenied)          # and the 403 family
+    assert exc.status_code == 403 and exc.offending == {"company_shared": ["Method"]}
+    text = str(exc)
+    assert "every project of the company" in text and "web app" in text
+    assert "not retry" in text
+
+
+def test_any_other_403_on_the_records_door_is_a_forbidden_write():
+    exc = errors.write_refused_for(403, _body("write_access_insufficient"), "u")
+    assert type(exc) is geodb.WriteForbidden
+    assert isinstance(exc, geodb.WriteRefused) and isinstance(exc, geodb.PermissionDenied)
+    assert isinstance(exc, geodb.AuthError)
+    assert exc.reason_code == "write_access_insufficient" and exc.status_code == 403
+
+
+def test_the_records_registry_names_the_two_codes():
+    assert errors.RECORDS_REASON_CODES == {
+        "writes_switched_off": geodb.WritesSwitchedOff,
+        "undo_needs_company_reach": geodb.UndoNeedsCompanyReach}
+    assert not set(errors.RECORDS_REASON_CODES) & set(errors.DATASET_REASON_CODES)

@@ -4,8 +4,9 @@ the README cannot list a method, path, export model or dataset reason code the
 client does not have:
 
 * ``tables``   — from ``geodb.client.TABLES`` (the records-lane table);
-* ``datasets`` — from ``geodb.errors.DATASET_REASON_CODES`` and what
-  ``geodb.datasets`` re-sends (the dataset reason-code table).
+* ``datasets`` — from ``geodb.errors.DATASET_REASON_CODES`` +
+  ``RECORDS_REASON_CODES`` and what ``geodb.datasets`` re-sends (the dataset
+  reason-code table).
 
     python scripts/gen_readme.py           # rewrite the marked regions
     python scripts/gen_readme.py --check   # exit 1 when one is stale
@@ -43,11 +44,19 @@ def _meaning(cls):
 
 
 def render_datasets():
-    from geodb.datasets import _RESTART_CODES, _RETRY_CODES, _RETRY_STOPS
-    from geodb.errors import DATASET_REASON_CODES
+    from geodb.datasets import (_RESTART_CODES, _RETRY_CODES, _RETRY_STOPS,
+                                SWITCHED_OFF_RETRIES)
+    from geodb.errors import (DATASET_REASON_CODES, RECORDS_REASON_CODES, WriteForbidden,
+                              WritesSwitchedOff)
     lines = ["| Reason code | Exception | Means | The client |", "|---|---|---|---|"]
-    for code, cls in DATASET_REASON_CODES.items():
-        if code in _RETRY_CODES and code in _RETRY_STOPS:
+    for code, cls in {**DATASET_REASON_CODES, **RECORDS_REASON_CODES}.items():
+        if issubclass(cls, WritesSwitchedOff):
+            does = (f"sends again at most {SWITCHED_OFF_RETRIES}×, only after a `Retry-After` "
+                    "the server named (warns); else raises at once. In a write's answer it is "
+                    "`DatasetWrite.stopped`")
+        elif issubclass(cls, WriteForbidden):
+            does = "raises; never sent again"
+        elif code in _RETRY_CODES and code in _RETRY_STOPS:
             does = ("sends again after `Retry-After` (bounded, warns) — a refused request "
                     "and a write that stopped on it alike")
         elif code in _RETRY_CODES:

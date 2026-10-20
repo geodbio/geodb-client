@@ -34,7 +34,7 @@ from .errors import (
     DatasetNotGrouped, DatasetPlanInvalid, DatasetPlanExpired, DatasetPlanChanged,
     DatasetFileChanged, DatasetAlreadyWritten, DatasetBusy, DatasetInProgress,
     DatasetRowsBusy, DatasetWriteFailed, DatasetProjectBusy, DatasetInterrupted,
-    DatasetJobFailed,
+    DatasetJobFailed, WriteForbidden, WritesSwitchedOff, UndoNeedsCompanyReach,
 )
 from .uploads import StorageUnreachable
 from .writes import WriteResult
@@ -51,6 +51,6 @@ __all__ = [
     "DatasetNotGrouped", "DatasetPlanInvalid", "DatasetPlanExpired", "DatasetPlanChanged",
     "DatasetFileChanged", "DatasetAlreadyWritten", "DatasetBusy", "DatasetInProgress",
     "DatasetRowsBusy", "DatasetWriteFailed", "DatasetProjectBusy", "DatasetInterrupted",
-    "DatasetJobFailed",
+    "DatasetJobFailed", "WriteForbidden", "WritesSwitchedOff", "UndoNeedsCompanyReach",
     "__version__",
 ]

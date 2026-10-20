@@ -189,12 +189,17 @@ class WriteRefused(APIError):
     batch goes on.
     """
 
+    #: A sentence the client adds to the server's message (what to do here).
+    hint = None
+
     def __init__(self, status_code, body, url=None):
         body = body if isinstance(body, dict) else {}
         message = (f"{body.get('reason_code') or 'refused'}: {body.get('detail') or ''}"
                    + (f" — {body['remedy']}" if body.get("remedy") else ""))
         super().__init__(status_code, message, url)
         self._keep(body)
+        if self.hint:
+            self.args = (f"{self.args[0]} {self.hint}",)
 
 
 class RowsRefused(WriteRefused):
@@ -239,14 +244,6 @@ class DatasetRefused(WriteRefused):
     act on ``remedy``, read ``offending``. A member that STOPS a write is not
     raised: it is ``DatasetWrite.stopped`` (``raise_for_stop()`` raises it as
     one of these)."""
-
-    #: A sentence the client adds to the server's message (what to do here).
-    hint = None
-
-    def __init__(self, status_code, body, url=None):
-        super().__init__(status_code, body, url)
-        if self.hint:
-            self.args = (f"{self.args[0]} {self.hint}",)
 
 
 class DatasetFileUnreadable(DatasetRefused):
@@ -356,6 +353,49 @@ class DatasetInterrupted(DatasetRefused):
         return (self.offending or {}).get("error_id")
 
 
+class WriteForbidden(WriteRefused, PermissionDenied):
+    """403 on the records endpoint: the key (or the person it acts for) may
+    not do this write — ``write_access_insufficient``, ``writes_staff_only``,
+    ``project_not_in_scope`` (also at a dataset job's poll once the key lost
+    the project) … Never re-sent. Both a :class:`WriteRefused` and a
+    :class:`PermissionDenied` (so an :class:`AuthError`)."""
+
+
+class UndoNeedsCompanyReach(WriteForbidden):
+    """``undo_needs_company_reach``: the write being undone created or changed
+    a record every project of the company shares (a laboratory, method or
+    standard), and this key no longer reaches every project of that company
+    (``offending.company_shared``). Refused whole; nothing was changed."""
+
+    hint = ("Do not retry with this key: undo it through a key that reaches every project of "
+            "the company (the user's own connection, set to cover the whole company), or ask "
+            "the user to undo it from the geoDB web app.")
+
+
+class WritesSwitchedOff(WriteRefused):
+    """``writes_switched_off``: writing through AI connections was switched
+    off on the server (503, an operator's switch, not something the request
+    did) after a background dataset job was accepted, so it did not run (a
+    write already running stopped before its next member; the members before
+    it stay landed, under its one Undo). Not a busy wait: the dataset
+    helpers send it again at most ONCE, and only when the server named a
+    ``Retry-After`` (``retry_after``) within ``MAX_RESEND_WAIT_SECONDS``;
+    otherwise it is raised at once."""
+
+    retry_after = None
+    hint = ("Writing through AI connections is switched off on the server right now: tell the "
+            "user that nothing more was written, and send the same request again later (a "
+            "write lands only what has not landed).")
+
+
+#: The records-door reason codes that are not dataset codes but have their own
+#: exception (server batch-C review §6.18; the README's table reads it too).
+RECORDS_REASON_CODES = {
+    "writes_switched_off": WritesSwitchedOff,
+    "undo_needs_company_reach": UndoNeedsCompanyReach,
+}
+
+
 #: dataset reason_code -> exception class (the README's table reads it).
 DATASET_REASON_CODES = {
     "dataset_file_unreadable": DatasetFileUnreadable,
@@ -376,16 +416,23 @@ DATASET_REASON_CODES = {
 
 
 def write_refused_for(status_code, body, url=None, *, headers=None):
-    """THE exception for a refused records request: the dataset class its
-    ``reason_code`` names, :class:`WriteThrottled` for a 429, else
-    :class:`WriteRefused`; a :class:`DatasetBusy` and a
-    :class:`WriteThrottled` carry the server's ``Retry-After``."""
+    """THE exception for a refused records request: the class its
+    ``reason_code`` names (:data:`DATASET_REASON_CODES`,
+    :data:`RECORDS_REASON_CODES`), :class:`WriteThrottled` for a 429,
+    :class:`WriteForbidden` for a 403, else :class:`WriteRefused`; a
+    :class:`DatasetBusy`, a :class:`WriteThrottled` and a
+    :class:`WritesSwitchedOff` carry the server's ``Retry-After``."""
     code = body.get("reason_code") if isinstance(body, dict) else None
-    cls = DATASET_REASON_CODES.get(code)
+    cls = DATASET_REASON_CODES.get(code) or RECORDS_REASON_CODES.get(code)
     if cls is None:
-        cls = WriteThrottled if status_code == 429 or code == "throttled" else WriteRefused
+        if status_code == 429 or code == "throttled":
+            cls = WriteThrottled
+        elif status_code == 403:
+            cls = WriteForbidden
+        else:
+            cls = WriteRefused
     exc = cls(status_code, body, url)
-    if isinstance(exc, (DatasetBusy, WriteThrottled)):
+    if isinstance(exc, (DatasetBusy, WriteThrottled, WritesSwitchedOff)):
         exc.retry_after = _retry_after_header(headers)
     return exc
 
