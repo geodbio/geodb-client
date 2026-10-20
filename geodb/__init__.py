@@ -28,7 +28,7 @@ from .errors import (
     DatasetRefused, DatasetFileUnreadable, DatasetColumnForbidden, DatasetTooLarge,
     DatasetNotGrouped, DatasetPlanInvalid, DatasetPlanExpired, DatasetPlanChanged,
     DatasetFileChanged, DatasetAlreadyWritten, DatasetBusy, DatasetInProgress,
-    DatasetRowsBusy, DatasetWriteFailed,
+    DatasetRowsBusy, DatasetWriteFailed, DatasetJobFailed,
 )
 from .uploads import StorageUnreachable
 from .writes import WriteResult
@@ -44,6 +44,6 @@ __all__ = [
     "DatasetRefused", "DatasetFileUnreadable", "DatasetColumnForbidden", "DatasetTooLarge",
     "DatasetNotGrouped", "DatasetPlanInvalid", "DatasetPlanExpired", "DatasetPlanChanged",
     "DatasetFileChanged", "DatasetAlreadyWritten", "DatasetBusy", "DatasetInProgress",
-    "DatasetRowsBusy", "DatasetWriteFailed",
+    "DatasetRowsBusy", "DatasetWriteFailed", "DatasetJobFailed",
     "__version__",
 ]

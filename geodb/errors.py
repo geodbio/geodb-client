@@ -343,3 +343,14 @@ def _retry_after_header(headers):
     except (TypeError, ValueError):
         return None
     return value if value >= 0 else None
+
+
+class DatasetJobFailed(GeodbError):
+    """A dataset job the server ran in the background (a large rehearsal,
+    write or undo) failed without a reason code, stalled, or ran past the
+    wait's hard cap. ``job_id`` names it; nothing is known to have landed
+    beyond what the write record says (``gx.writes(model="Dataset")``)."""
+
+    def __init__(self, job_id, message):
+        self.job_id = job_id
+        super().__init__(message)
