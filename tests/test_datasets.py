@@ -572,3 +572,18 @@ def test_the_docstrings_teach_the_dry_run_is_the_authority_and_the_yes():
     assert "one Undo" in doc
     wdoc = " ".join(datasets.DatasetPlan.write.__doc__.split())
     assert "verbatim" in wdoc and "yes" in wdoc
+
+
+# ── the README section is generated (scripts/gen_readme.py) ─────────────────
+def test_the_readme_dataset_table_is_generated_from_the_registry():
+    import importlib.util
+    import pathlib
+    from geodb.errors import DATASET_REASON_CODES
+    root = pathlib.Path(__file__).resolve().parents[1]
+    spec_ = importlib.util.spec_from_file_location("gen_readme", root / "scripts" / "gen_readme.py")
+    gen = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(gen)
+    assert gen.stale() == "", "README.md is stale: run python scripts/gen_readme.py"
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    for code, cls in DATASET_REASON_CODES.items():
+        assert f"| `{code}` | `geodb.{cls.__name__}` |" in readme

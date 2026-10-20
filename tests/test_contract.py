@@ -88,3 +88,12 @@ def test_record_counts_is_a_published_read_taking_project(spec):
     op = spec["paths"].get("/api/v2/record-counts/", {}).get("get")
     assert op is not None, "the spec has no GET /api/v2/record-counts/"
     assert "project" in {p.get("name") for p in op.get("parameters", [])}
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "the dataset reason codes (server W6) are published by the geodb-protocol regeneration "
+    "that follows their deploy; when this XPASSes, errors.json has them: delete this marker"))
+def test_every_dataset_reason_code_is_registered():
+    from geodb.errors import DATASET_REASON_CODES
+    codes = set(json.loads((PROTOCOL / "errors.json").read_text())["reason_codes"])
+    assert set(DATASET_REASON_CODES) <= codes, sorted(set(DATASET_REASON_CODES) - codes)

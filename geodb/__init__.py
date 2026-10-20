@@ -16,6 +16,11 @@ geodb-client — the Python client for the geoDB Open Exploration Protocol.
     gx.upload_document("report.pdf", project=12, category="RP")
     gx.upload_project_file("pit_shell.glb", project=12)
 
+    # several dependent record types at once (see geodb.datasets):
+    plan = gx.validate_dataset(12, {"Method": methods_df, "Assay": assays_df})
+    print(plan.summary())                         # show the user; nothing written yet
+    done = plan.write()                           # only after their yes; done.undo() = one Undo
+
 See https://github.com/geodbio/geodb-protocol for the protocol spec.
 """
 
