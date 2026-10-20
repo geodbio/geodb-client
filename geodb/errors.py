@@ -309,6 +309,34 @@ class DatasetWriteFailed(DatasetRefused):
     error; nothing of it landed (members before it may have)."""
 
 
+class DatasetProjectBusy(DatasetBusy):
+    """``dataset_project_busy``: dataset jobs on one project run one at a
+    time; this background job waited the longest it may for another one on
+    the same project (``waited_seconds``), then stopped. Nothing of it was
+    written. It arrives at the job's poll, which carries no ``Retry-After``:
+    the dataset helpers send the same request again after
+    ``geodb.datasets.PROJECT_BUSY_FALLBACK_SECONDS`` (bounded, warns)."""
+
+    @property
+    def waited_seconds(self):
+        return (self.offending or {}).get("waited_seconds")
+
+
+class DatasetInterrupted(DatasetRefused):
+    """``dataset_interrupted``: a background dataset job (a rehearsal, write
+    or undo) ended without finishing — the server running it stopped or hit
+    an unexpected error. A write landed nothing of the member it was on;
+    members before it stay landed. The remedy is the same request again (a
+    rehearsal runs from the start, a write lands only what has not landed,
+    an undo takes back what is still there): the dataset helpers send it again
+    ONCE (``restart_interrupted``, warns), like an interrupted export, then
+    raise this. ``error_id`` is the id to quote to geoDB."""
+
+    @property
+    def error_id(self):
+        return (self.offending or {}).get("error_id")
+
+
 #: dataset reason_code -> exception class (the README's table reads it).
 DATASET_REASON_CODES = {
     "dataset_file_unreadable": DatasetFileUnreadable,
@@ -323,6 +351,8 @@ DATASET_REASON_CODES = {
     "dataset_already_written": DatasetAlreadyWritten,
     "dataset_in_progress": DatasetInProgress,
     "dataset_write_failed": DatasetWriteFailed,
+    "dataset_project_busy": DatasetProjectBusy,
+    "dataset_interrupted": DatasetInterrupted,
 }
 
 

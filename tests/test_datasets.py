@@ -535,6 +535,117 @@ def test_admission_refusals_raise_their_exception(clock, code, cls):
         plan.write()
 
 
+# ── W7c: the two background-job codes (server C2) ───────────────────────────
+def failed_at_poll(code, kind="rehearsal", **offending):
+    """A finished-but-failed job: the server polls it 200, status failed, the
+    refusal's keys top-level (``dataset_lane.poll``)."""
+    return Resp(200, {"id": DS, "kind": kind, "status": "failed", "reason_code": code,
+                      "detail": f"the server's words for {code}", "remedy": "Send it again.",
+                      "offending": offending or None,
+                      "progress": {"member": None, "members": None, "model": None,
+                                   "rows_done": 0, "rows_total": None}})
+
+
+def _records_kw(s):
+    return [kw for m, u, kw in s.calls if m == "POST" and u.endswith("/records/")]
+
+
+def test_project_busy_at_the_poll_is_sent_again_under_a_new_key_after_the_fallback(clock):
+    # The 202 that queued the job was STORED under its Idempotency-Key (a 2xx):
+    # re-sent under it, the server would answer the same finished job again.
+    gx, s = _client(uploaded(812), queued(), failed_at_poll("dataset_project_busy",
+                                                            waited_seconds=1800),
+                    Resp(200, answer()))
+    with pytest.warns(RuntimeWarning, match="dataset_project_busy"):
+        plan = gx.validate_dataset(12, {"Method": METHODS})
+    assert plan.plan_token == TOKEN
+    assert clock.sleeps == [datasets.PROJECT_BUSY_FALLBACK_SECONDS]
+    a, b = _records_kw(s)
+    assert a["json"] == b["json"]                                   # the same request
+    assert a["headers"]["Idempotency-Key"] != b["headers"]["Idempotency-Key"]
+
+
+def test_project_busy_past_the_bound_raises_its_exception(clock):
+    gx, _s = _client(uploaded(812), queued(), failed_at_poll("dataset_project_busy"),
+                     queued(), failed_at_poll("dataset_project_busy"))
+    with pytest.warns(RuntimeWarning):
+        with pytest.raises(geodb.DatasetProjectBusy) as caught:
+            gx.validate_dataset(12, {"Method": METHODS}, busy_retries=1)
+    assert caught.value.waited_seconds is None and caught.value.status_code == 409
+
+
+def test_rows_busy_at_the_poll_is_sent_again_under_a_new_key(clock):
+    gx, s = _client(uploaded(812), queued(), failed_at_poll("dataset_rows_busy"),
+                    Resp(200, answer()))
+    with pytest.warns(RuntimeWarning, match="dataset_rows_busy"):
+        gx.validate_dataset(12, {"Method": METHODS})
+    a, b = _records_kw(s)
+    assert a["headers"]["Idempotency-Key"] != b["headers"]["Idempotency-Key"]
+    assert clock.sleeps == [datasets.BUSY_FALLBACK_SECONDS]
+
+
+def test_an_interrupted_rehearsal_is_sent_again_once_out_loud(clock):
+    gx, s = _client(uploaded(812), queued(), failed_at_poll("dataset_interrupted",
+                                                            error_id="e-1"),
+                    Resp(200, answer()))
+    with pytest.warns(RuntimeWarning, match="interrupted.*e-1"):
+        plan = gx.validate_dataset(12, {"Method": METHODS})
+    assert plan.plan_token == TOKEN
+    a, b = _records_kw(s)
+    assert a["json"] == b["json"]
+    assert a["headers"]["Idempotency-Key"] != b["headers"]["Idempotency-Key"]
+    assert clock.sleeps == []                                      # a restart, not a busy wait
+
+
+def test_interrupted_twice_raises_naming_the_error_id(clock):
+    gx, s = _client(uploaded(812), queued(), failed_at_poll("dataset_interrupted", error_id="e-1"),
+                    queued(), failed_at_poll("dataset_interrupted", error_id="e-2"))
+    with pytest.warns(RuntimeWarning):
+        with pytest.raises(geodb.DatasetInterrupted) as caught:
+            gx.validate_dataset(12, {"Method": METHODS})
+    assert caught.value.error_id == "e-2"
+    assert len(_records_kw(s)) == 2                                # sent again ONCE
+
+
+def test_restart_interrupted_zero_raises_at_the_first(clock):
+    gx, s = _client(uploaded(812), queued(), failed_at_poll("dataset_interrupted"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(geodb.DatasetInterrupted):
+            gx.validate_dataset(12, {"Method": METHODS}, restart_interrupted=0)
+    assert len(_records_kw(s)) == 1
+
+
+def test_an_interrupted_write_sends_the_same_write_body_again(clock):
+    # The server: a write sent again lands only the members that have not landed.
+    plan, s = _plan([queued(kind="write"), failed_at_poll("dataset_interrupted", kind="write"),
+                     Resp(200, write_done())])
+    with pytest.warns(RuntimeWarning, match="interrupted"):
+        done = plan.write()
+    assert done.status == "done"
+    first, second = _records_kw(s)[-2:]
+    assert first["json"] == second["json"] == WRITE_BODY
+    assert first["headers"]["Idempotency-Key"] != second["headers"]["Idempotency-Key"]
+
+
+def test_write_restart_interrupted_zero_raises_at_the_first(clock):
+    plan, s = _plan([queued(kind="write"), failed_at_poll("dataset_interrupted", kind="write")])
+    with pytest.raises(geodb.DatasetInterrupted):
+        plan.write(restart_interrupted=0)
+    assert len(_records_kw(s)) == 2                                # the rehearsal + one write
+
+
+def test_an_interrupted_undo_is_sent_again_once(clock):
+    undone = {"intent": "undo", "write_id": "u-1", "complete": True, "rows": []}
+    plan, s = _plan([Resp(200, write_done()), queued(kind="undo"),
+                     failed_at_poll("dataset_interrupted", kind="undo"), Resp(200, undone)])
+    with pytest.warns(RuntimeWarning, match="interrupted"):
+        result = plan.write().undo()
+    assert result.complete is True
+    assert s.records_posts()[-1] == s.records_posts()[-2] == {"intent": "undo", "write_id": "w-1",
+                                                              "dry_run": False}
+
+
 # ── the one Undo ────────────────────────────────────────────────────────────
 def test_undo_is_one_request_for_the_whole_dataset(clock):
     undone = {"intent": "undo", "write_id": "u-1", "complete": True, "summary": {"undone": 3},

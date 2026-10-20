@@ -397,6 +397,8 @@ The dataset reason codes, each its own exception (all subclasses of `geodb.Write
 | `dataset_already_written` | `geodb.DatasetAlreadyWritten` | the plan landed already (or was undone); a plan is never landed twice | raises; in a write's answer it is `DatasetWrite.stopped` |
 | `dataset_in_progress` | `geodb.DatasetInProgress` | this plan is being written right now by another request (the same write sent twice) | sends again after `Retry-After` (bounded, warns), then raises |
 | `dataset_write_failed` | `geodb.DatasetWriteFailed` | a member stopped on an unexpected server error; nothing of it landed (members before it may have) | raises; in a write's answer it is `DatasetWrite.stopped` |
+| `dataset_project_busy` | `geodb.DatasetProjectBusy` | dataset jobs on one project run one at a time; this background job waited the longest it may for another one on the same project (`waited_seconds`), then stopped | sends again after `Retry-After` (bounded, warns), then raises |
+| `dataset_interrupted` | `geodb.DatasetInterrupted` | a background dataset job (a rehearsal, write or undo) ended without finishing — the server running it stopped or hit an unexpected error | sends the same request again once (`restart_interrupted`, warns), then raises |
 <!-- END:datasets -->
 
 A background dataset job that fails with no reason code, stalls or runs past the hard cap raises

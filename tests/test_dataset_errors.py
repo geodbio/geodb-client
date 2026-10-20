@@ -25,6 +25,8 @@ CASES = [
     ("dataset_already_written", 409, geodb.DatasetAlreadyWritten),
     ("dataset_in_progress", 409, geodb.DatasetInProgress),
     ("dataset_write_failed", 409, geodb.DatasetWriteFailed),
+    ("dataset_project_busy", 409, geodb.DatasetProjectBusy),
+    ("dataset_interrupted", 409, geodb.DatasetInterrupted),
 ]
 
 
@@ -56,7 +58,8 @@ def test_any_other_code_stays_a_plain_write_refused():
 
 
 @pytest.mark.parametrize("code,cls", [("dataset_in_progress", geodb.DatasetInProgress),
-                                      ("dataset_rows_busy", geodb.DatasetRowsBusy)])
+                                      ("dataset_rows_busy", geodb.DatasetRowsBusy),
+                                      ("dataset_project_busy", geodb.DatasetProjectBusy)])
 def test_the_retry_after_codes_carry_the_servers_wait(code, cls):
     exc = errors.write_refused_for(409, _body(code), "u", headers={"Retry-After": "45"})
     assert isinstance(exc, geodb.DatasetBusy) and exc.retry_after == 45
@@ -92,3 +95,16 @@ def test_a_refused_records_write_is_typed_by_its_code():
     with pytest.raises(geodb.DatasetInProgress) as caught:
         gx.write("DrillCollar", [{"name": "DH-1"}])
     assert caught.value.retry_after == 30
+
+
+def test_project_busy_is_the_busy_family_and_interrupted_is_not():
+    # W7c (server C2): dataset_project_busy = "send the same request again later";
+    # dataset_interrupted = the job ended without finishing (re-sent once, like an
+    # export's interruption) — not a busy wait.
+    assert issubclass(geodb.DatasetProjectBusy, geodb.DatasetBusy)
+    assert not issubclass(geodb.DatasetInterrupted, geodb.DatasetBusy)
+    exc = errors.write_refused_for(409, _body("dataset_interrupted", error_id="e1f2"), "u")
+    assert exc.error_id == "e1f2"
+    assert errors.write_refused_for(409, _body("dataset_interrupted"), "u").error_id is None
+    busy = errors.write_refused_for(409, _body("dataset_project_busy", waited_seconds=1800), "u")
+    assert busy.waited_seconds == 1800

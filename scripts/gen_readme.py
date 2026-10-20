@@ -43,7 +43,7 @@ def _meaning(cls):
 
 
 def render_datasets():
-    from geodb.datasets import _RETRY_CODES, _RETRY_STOPS
+    from geodb.datasets import _RESTART_CODES, _RETRY_CODES, _RETRY_STOPS
     from geodb.errors import DATASET_REASON_CODES
     lines = ["| Reason code | Exception | Means | The client |", "|---|---|---|---|"]
     for code, cls in DATASET_REASON_CODES.items():
@@ -52,6 +52,9 @@ def render_datasets():
                     "and a write that stopped on it alike")
         elif code in _RETRY_CODES:
             does = "sends again after `Retry-After` (bounded, warns), then raises"
+        elif code in _RESTART_CODES:
+            does = ("sends the same request again once (`restart_interrupted`, warns), "
+                    "then raises")
         else:
             does = "raises; in a write's answer it is `DatasetWrite.stopped`"
         lines.append(f"| `{code}` | `geodb.{cls.__name__}` | {_meaning(cls)} | {does} |")
