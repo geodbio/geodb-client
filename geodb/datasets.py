@@ -210,6 +210,18 @@ def _queued(data):
     return None
 
 
+def _refusal_status(data):
+    """The HTTP status a failed job's refusal would have carried inline: the
+    poll body's ``status_code`` (server C-fix 9: 401, 403, 409, 429, 503 …),
+    so the client raises what the same refusal raises at the POST. 409 when
+    the server named none (an older server) or one that is not a refusal."""
+    try:
+        status = int(data.get("status_code"))
+    except (TypeError, ValueError):
+        return 409
+    return status if 400 <= status <= 599 else 409
+
+
 def _is_stop(data):
     return isinstance(data, dict) and data.get("status") == "stopped" and "members" in data
 
@@ -252,6 +264,7 @@ class DatasetJob:
         self.waiting_for = None
         self.progress = {}
         self.retry_after = None
+        self.headers = {}
         self.result = None
         self.poll_path = self._poll_path(handle.get("poll"))
 
@@ -268,7 +281,8 @@ class DatasetJob:
     def status(self):
         """One poll; the job's attributes are refreshed from it."""
         from .client import _retry_after
-        data, headers = self._client._poll(self.poll_path)
+        data, headers = self._client._poll(self.poll_path, records=True)
+        self.headers = headers
         self.state = data.get("status", self.state)
         self.kind = data.get("kind", self.kind)
         progress = data.get("progress")
@@ -300,7 +314,11 @@ class DatasetJob:
                 source = result if isinstance(result, dict) and result.get("reason_code") \
                     else data
                 if source.get("reason_code"):
-                    raise write_refused_for(409, source, self._client._url(self.poll_path))
+                    # The refusal's own status (a 401 is the AuthError family,
+                    # a 403 WriteForbidden …), never re-sent unless its code says.
+                    raise write_refused_for(_refusal_status(data), source,
+                                            self._client._url(self.poll_path),
+                                            headers=self.headers)
                 raise DatasetJobFailed(
                     self.id, f"Dataset job {self.id} ({self.kind or 'dataset'}) failed: "
                              f"{data.get('error_message') or data.get('error') or data.get('detail') or 'no reason given'}")
@@ -438,7 +456,7 @@ class DatasetPlan(_Answer):
         if not link:
             raise ValueError("this answer offers no detail file")
         job = DatasetJob(self._client, {"id": self.dataset_id, "poll": link})
-        return self._client._download(self._client._url(job.poll_path), path)
+        return self._client._download(self._client._url(job.poll_path), path, records=True)
 
     def write(self, *, on_progress=None, poll_seconds=None, timeout=3 * 3600,
               stall_timeout=900, busy_retries=3, idempotency_key=None, restart_interrupted=1):

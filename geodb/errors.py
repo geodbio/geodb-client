@@ -416,12 +416,16 @@ DATASET_REASON_CODES = {
 
 
 def write_refused_for(status_code, body, url=None, *, headers=None):
-    """THE exception for a refused records request: the class its
-    ``reason_code`` names (:data:`DATASET_REASON_CODES`,
-    :data:`RECORDS_REASON_CODES`), :class:`WriteThrottled` for a 429,
-    :class:`WriteForbidden` for a 403, else :class:`WriteRefused`; a
-    :class:`DatasetBusy`, a :class:`WriteThrottled` and a
-    :class:`WritesSwitchedOff` carry the server's ``Retry-After``."""
+    """THE exception for a refused records request: a 401 is the
+    :class:`AuthError` family (``grant_revoked``, ``grant_holder_removed`` …,
+    as :func:`error_for` raises it); else the class its ``reason_code``
+    names (:data:`DATASET_REASON_CODES`, :data:`RECORDS_REASON_CODES`),
+    :class:`WriteThrottled` for a 429, :class:`WriteForbidden` for a 403,
+    else :class:`WriteRefused`; a :class:`DatasetBusy`, a
+    :class:`WriteThrottled` and a :class:`WritesSwitchedOff` carry the
+    server's ``Retry-After``."""
+    if status_code == 401:
+        return error_for(401, body, url, headers=headers)
     code = body.get("reason_code") if isinstance(body, dict) else None
     cls = DATASET_REASON_CODES.get(code) or RECORDS_REASON_CODES.get(code)
     if cls is None:

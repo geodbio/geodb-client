@@ -961,3 +961,94 @@ def test_a_plain_undo_that_needs_company_reach_is_typed(clock):
     with pytest.raises(geodb.UndoNeedsCompanyReach):
         gx.undo("w-7")
     assert len(_records_kw(s)) == 1
+
+
+# ── W7d: a failed job's poll carries the refusal's ORIGINAL status_code ─────
+# (server C-fix 9, dataset_lane.poll: the poll answers 200; "status_code" is
+# what the refusal would have carried inline — raise what that would have.)
+def failed_with(code, status_code, kind="rehearsal", **offending):
+    resp = failed_at_poll(code, kind=kind, **offending)
+    resp._payload["status_code"] = status_code
+    return resp
+
+
+@pytest.mark.parametrize("code", ["grant_revoked", "grant_holder_removed", "grant_expired"])
+def test_a_401_at_the_poll_is_the_auth_error_family_never_sent_again(clock, code):
+    gx, s = _client(uploaded(812), queued(), failed_with(code, 401))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(geodb.AuthError) as caught:
+            gx.validate_dataset(12, {"Method": METHODS})
+    assert not isinstance(caught.value, geodb.WriteRefused)
+    assert caught.value.reason_code == code and caught.value.status_code == 401
+    assert caught.value.remedy == "Send it again."
+    assert len(_records_kw(s)) == 1 and clock.sleeps == []
+
+
+@pytest.mark.parametrize("code", ["project_not_in_scope", "write_access_insufficient"])
+def test_a_403_at_the_poll_is_a_forbidden_write_never_sent_again(clock, code):
+    plan, s = _plan([queued(kind="write"), failed_with(code, 403, kind="write")])
+    with pytest.raises(geodb.WriteForbidden) as caught:
+        plan.write()
+    assert isinstance(caught.value, geodb.PermissionDenied)
+    assert caught.value.reason_code == code and caught.value.status_code == 403
+    assert len(_records_kw(s)) == 2
+
+
+def test_a_503_at_the_poll_carries_its_own_status(clock):
+    gx, _s = _client(uploaded(812), queued(), failed_with("writes_switched_off", 503))
+    with pytest.raises(geodb.WritesSwitchedOff) as caught:
+        gx.validate_dataset(12, {"Method": METHODS})
+    assert caught.value.status_code == 503
+
+
+def test_a_409_at_the_poll_is_its_code_as_before(clock):
+    gx, _s = _client(uploaded(812), queued(), failed_with("dataset_file_changed", 409))
+    with pytest.raises(geodb.DatasetFileChanged) as caught:
+        gx.validate_dataset(12, {"Method": METHODS})
+    assert caught.value.status_code == 409
+
+
+def test_a_429_at_the_poll_is_write_throttled_and_sent_again(clock):
+    gx, s = _client(uploaded(812), queued(), failed_with("throttled", 429), Resp(200, answer()))
+    with pytest.warns(RuntimeWarning, match="throttled"):
+        plan = gx.validate_dataset(12, {"Method": METHODS})
+    assert plan.plan_token == TOKEN
+    assert clock.sleeps == [datasets.THROTTLED_FALLBACK_SECONDS]
+    a, b = _records_kw(s)
+    assert a["headers"]["Idempotency-Key"] != b["headers"]["Idempotency-Key"]
+
+
+@pytest.mark.parametrize("status_code", [None, "x", 200, 999])
+def test_without_a_usable_status_code_the_poll_reads_as_before(clock, status_code):
+    # An older server sends no status_code: a refusal at the poll reads as 409.
+    ended = failed_at_poll("write_access_insufficient")
+    if status_code is not None:
+        ended._payload["status_code"] = status_code
+    gx, _s = _client(uploaded(812), queued(), ended)
+    with pytest.raises(geodb.WriteRefused) as caught:
+        gx.validate_dataset(12, {"Method": METHODS})
+    assert type(caught.value) is geodb.WriteRefused and caught.value.status_code == 409
+
+
+def test_a_403_answering_the_poll_itself_is_a_forbidden_write(clock):
+    # Server C-fix 8: once the key lost the project, the poll is refused 403.
+    lost = Resp(403, {"reason_code": "project_not_in_scope", "detail": "no longer reads it",
+                      "remedy": "GET /api/v2/grant-context/", "offending": {"dataset": DS}})
+    gx, s = _client(uploaded(812), queued(), lost)
+    with pytest.raises(geodb.WriteForbidden) as caught:
+        gx.validate_dataset(12, {"Method": METHODS})
+    assert caught.value.reason_code == "project_not_in_scope"
+    assert caught.value.offending == {"dataset": DS}
+    assert len(_records_kw(s)) == 1
+
+
+def test_a_403_on_the_detail_file_keeps_its_reason_code(clock, tmp_path):
+    lost = Resp(403, {"reason_code": "project_not_in_scope", "detail": "no longer reads it",
+                      "remedy": "GET /api/v2/grant-context/"})
+    gx, _s = _client(uploaded(812), Resp(200, answer()), lost)
+    plan = gx.validate_dataset(12, {"Method": METHODS})
+    with pytest.raises(geodb.WriteForbidden) as caught:
+        plan.download_detail(tmp_path / "d.parquet")
+    assert caught.value.reason_code == "project_not_in_scope"
+    assert not (tmp_path / "d.parquet").exists()

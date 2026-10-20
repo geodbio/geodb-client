@@ -228,7 +228,8 @@ name.
 Every write goes through ONE endpoint, `POST /api/v2/records/`, and is
 answered **per row**: a bad row comes back with its own `reason_code` and
 `remedy` while the rest of the batch lands. Only a refusal of the whole
-request raises `geodb.WriteRefused` (with `.reason_code` and `.remedy`).
+request raises `geodb.WriteRefused` (with `.reason_code` and `.remedy`); a 403 is
+`geodb.WriteForbidden` (also a `geodb.PermissionDenied`), never worth re-sending.
 
 ```python
 gx.describe("DrillSample")                    # fields, identity, sets, coordinate rule
@@ -407,7 +408,13 @@ each its own exception (all subclasses of `geodb.WriteRefused`):
 <!-- END:datasets -->
 
 A background dataset job that fails with no reason code, stalls or runs past the hard cap raises
-`geodb.DatasetJobFailed`.
+`geodb.DatasetJobFailed`. One that failed WITH a reason code raises what the same refusal raises
+when it answers the request itself: the poll names its original `status_code`, so a 401 is the
+`geodb.AuthError` family (`grant_revoked`, `grant_holder_removed` — the key no longer works; never
+re-sent), a 403 is `geodb.WriteForbidden` (`project_not_in_scope`, `write_access_insufficient`;
+also when the poll itself is refused because the key lost the project), and a 409 / 503 is its
+code's class above. (From a server that names no `status_code`, a refusal at the poll reads as
+409.)
 
 A 429 `throttled` on a dataset request (the key's dataset rate, or the dataset jobs it already has
 queued or running) raises `geodb.WriteThrottled` (also a `geodb.Throttled`; `.retry_after`,

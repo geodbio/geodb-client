@@ -575,13 +575,15 @@ class Client(UploadsMixin, DatasetsMixin):
         self._check_protocol(resp)
         return self._handle(resp, raw_status=raw_status)
 
-    def _poll(self, path):
+    def _poll(self, path, *, records=False):
         """``(body, headers)`` of a job status poll: 202 in flight; 200 once
         it ended — an export ``done``, a dataset job ``done`` OR ``failed`` /
-        ``cancelled`` (its refusal's ``reason_code`` top-level: the BODY says
-        which, ``DatasetJob.wait`` settles it); 500 with ``state: error`` an
-        export that failed (a dataset job on an older server too). Any other
-        refusal raises its typed exception (a 429 ``throttled`` too)."""
+        ``cancelled`` (its refusal's ``reason_code`` and original
+        ``status_code`` top-level: the BODY says which, ``DatasetJob.wait``
+        settles it); 500 with ``state: error`` an export that failed (a
+        dataset job on an older server too). Any other refusal raises its
+        typed exception (a 429 ``throttled`` too; ``records``: see
+        :meth:`_refused`)."""
         resp = self._session.get(self._url(path), headers=self._headers(),
                                  timeout=self.timeout)
         self._check_protocol(resp)
@@ -594,8 +596,19 @@ class Client(UploadsMixin, DatasetsMixin):
                 return body, getattr(resp, "headers", None) or {}
             if resp.status_code != 500:
                 return {}, getattr(resp, "headers", None) or {}
-        raise error_for(resp.status_code, self._body(resp), resp.url,
-                        text=resp.text[:300], headers=resp.headers)
+        raise self._refused(resp, records=records)
+
+    def _refused(self, resp, *, records=False):
+        """THE exception for a refused GET (:func:`errors.error_for`). On a
+        records path (``records``: a dataset job's poll or detail file) a 403
+        is the records door's own: :class:`geodb.WriteForbidden` — the class
+        the same refusal raises when it answers the POST (e.g.
+        ``project_not_in_scope`` once the key lost the job's project)."""
+        if records and resp.status_code == 403:
+            return write_refused_for(403, self._body(resp), resp.url,
+                                     headers=getattr(resp, "headers", None))
+        return error_for(resp.status_code, self._body(resp), resp.url,
+                         text=resp.text[:300], headers=getattr(resp, "headers", None))
 
     def _post(self, path, json=None):
         resp = self._session.post(self._url(path), json=json,
@@ -626,7 +639,7 @@ class Client(UploadsMixin, DatasetsMixin):
             return resp.json()
         return {}
 
-    def _download(self, url, path, chunk_size=1 << 20):
+    def _download(self, url, path, chunk_size=1 << 20, *, records=False):
         # The first hop is the authenticated asset/export redirect endpoint. Do
         # NOT auto-follow: the 302 Location is a self-authenticating URL (a
         # short-lived signed blob URL in prod, or a dev media URL) and the grant
@@ -635,6 +648,8 @@ class Client(UploadsMixin, DatasetsMixin):
         # So resolve the redirect ourselves and fetch the target UNauthenticated.
         resp = self._session.get(url, headers=self._headers(),
                                  allow_redirects=False, timeout=self.timeout)
+        if records and resp.status_code in (401, 403):
+            raise self._refused(resp, records=True)          # the API's own refusal, typed
         if resp.status_code in (301, 302, 303, 307, 308):
             target = resp.headers.get("Location")
             if not target:
