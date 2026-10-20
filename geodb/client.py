@@ -284,6 +284,80 @@ def _error_id(message):
     return match.group(1) if match else None
 
 
+#: What a job's ``settle(data)`` answers to keep polling, or to restart the
+#: stall clock (the job was created again).
+_PENDING = object()
+_RESTARTED = object()
+
+
+def _sleep_capped(seconds, start, timeout):
+    """Sleep ``seconds``, never past the hard cap (``start`` + ``timeout``)."""
+    remaining = timeout - (time.monotonic() - start)
+    seconds = min(seconds, max(remaining, 0))
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def _wait_job(job, settle, *, poll_seconds=None, timeout=3 * 3600, stall_timeout=900,
+              on_progress=None):
+    """THE wait for a job the server builds in the background — an export
+    (:meth:`ExportJob.wait`) or a dataset rehearsal / write / undo
+    (``geodb.datasets.DatasetJob``). One loop, so both poll alike:
+
+    * ``job.status()`` is one poll; it refreshes the job (its progress and
+      ``job.retry_after``, the server's ``Retry-After`` while in flight);
+    * ``on_progress(job)`` after every poll;
+    * ``settle(data)`` decides: :data:`_PENDING` keeps polling,
+      :data:`_RESTARTED` keeps polling with the stall clock reset, anything
+      else is returned (or ``settle`` raises);
+    * the next poll follows the server's ``Retry-After`` (10 s when absent; a
+      smaller ``poll_seconds`` is raised to it); a 429 ``throttled`` poll waits
+      its own ``Retry-After`` and polls again;
+    * ``stall_timeout``: give up when ``job.progress_key()`` did not change for
+      that long (``job.stalled(stall_timeout)`` is raised); ``timeout`` is the
+      hard cap on the whole wait (``job.timed_out(timeout)``)."""
+    clock = time.monotonic
+    start = last_moved = clock()
+    last_seen = None
+    while True:
+        try:
+            data = job.status()
+        except Throttled as exc:
+            data = None
+            _sleep_capped(exc.retry_after if exc.retry_after is not None
+                          else _POLL_FALLBACK_SECONDS, start, timeout)
+        if data is not None:
+            if on_progress is not None:
+                on_progress(job)
+            verdict = settle(data)
+            if verdict is _RESTARTED:
+                last_moved, last_seen = clock(), None
+                continue
+            if verdict is not _PENDING:
+                return verdict
+            seen = job.progress_key()
+            if seen != last_seen:
+                last_seen, last_moved = seen, clock()
+        now = clock()
+        if now - start >= timeout:
+            raise job.timed_out(timeout)
+        if now - last_moved >= stall_timeout:
+            raise job.stalled(stall_timeout)
+        if data is None:
+            continue
+        if poll_seconds is None:
+            wait = job.retry_after if job.retry_after is not None else _POLL_FALLBACK_SECONDS
+        else:
+            wait = max(poll_seconds, job.retry_after or 0)
+        _sleep_capped(wait, start, timeout)
+
+
+def _pause(seconds):
+    """One deliberate wait between re-sends (the module clock tests replace)."""
+    if seconds > 0:
+        time.sleep(seconds)
+
+
 class ExportJob:
     """A bulk export job of one project's WHOLE table, for analysis — never to
     check an import (the write's dry run answers that). Poll it to completion
@@ -362,65 +436,44 @@ class ExportJob:
 
         Raises :class:`geodb.ExportError` on a failed build, an empty export,
         a stall or the hard cap. A 429 ``throttled`` poll waits its
-        ``Retry-After`` and polls again.
+        ``Retry-After`` and polls again. (The loop is THE one the dataset
+        jobs wait on too: ``_wait_job``.)
         """
-        clock = time.monotonic
-        start = last_moved = clock()
-        last_seen = None
-        while True:
-            try:
-                data = self.status()
-            except Throttled as exc:
-                data = None
-                self._sleep(exc.retry_after if exc.retry_after is not None
-                            else _POLL_FALLBACK_SECONDS, start, timeout)
-            if data is not None:
-                state = data.get("state")
-                if on_progress is not None:
-                    on_progress(self)
-                if state == "done":
-                    self.state = "done"
-                    if data.get("empty"):
-                        raise ExportError("Export contained no data.")
-                    return self
-                if state == "error":
-                    message = data.get("error_message") or "Export failed."
-                    if not _interrupted(message):
-                        raise ExportError(message)
-                    self.interrupted_error_ids.append(_error_id(message))
-                    if self.restarts >= restart_interrupted or self._create_body is None:
-                        raise ExportInterrupted(self.id, message, _error_id(message))
-                    self._restart(message)
-                    last_moved, last_seen = clock(), None
-                    continue
-                seen = (state, self.rows_done, self.progress_pct, self.progress_message)
-                if seen != last_seen:
-                    last_seen, last_moved = seen, clock()
-            now = clock()
-            if now - start >= timeout:
-                raise ExportError(f"Export {self.id} did not finish within {timeout} s "
-                                  f"(state {self.state}, {self.rows_done} of "
-                                  f"{self.rows_total} rows).")
-            if now - last_moved >= stall_timeout:
-                raise ExportError(f"Export {self.id} made no progress for {stall_timeout} s "
-                                  f"(state {self.state}, {self.rows_done} of "
-                                  f"{self.rows_total} rows).")
-            if data is None:
-                continue
-            if poll_seconds is None:
-                wait = self.retry_after if self.retry_after is not None \
-                    else _POLL_FALLBACK_SECONDS
-            else:
-                wait = max(poll_seconds, self.retry_after or 0)
-            self._sleep(wait, start, timeout)
+        def settle(data):
+            state = data.get("state")
+            if state == "done":
+                self.state = "done"
+                if data.get("empty"):
+                    raise ExportError("Export contained no data.")
+                return self
+            if state == "error":
+                message = data.get("error_message") or "Export failed."
+                if not _interrupted(message):
+                    raise ExportError(message)
+                self.interrupted_error_ids.append(_error_id(message))
+                if self.restarts >= restart_interrupted or self._create_body is None:
+                    raise ExportInterrupted(self.id, message, _error_id(message))
+                self._restart(message)
+                return _RESTARTED
+            return _PENDING
 
-    @staticmethod
-    def _sleep(seconds, start, timeout):
-        """Sleep ``seconds``, never past the hard cap."""
-        remaining = timeout - (time.monotonic() - start)
-        seconds = min(seconds, max(remaining, 0))
-        if seconds > 0:
-            time.sleep(seconds)
+        return _wait_job(self, settle, poll_seconds=poll_seconds, timeout=timeout,
+                         stall_timeout=stall_timeout, on_progress=on_progress)
+
+    # -- what _wait_job asks of a job -----------------------------------------
+    def progress_key(self):
+        """What counts as movement for the stall clock."""
+        return (self.state, self.rows_done, self.progress_pct, self.progress_message)
+
+    def timed_out(self, timeout):
+        return ExportError(f"Export {self.id} did not finish within {timeout} s "
+                           f"(state {self.state}, {self.rows_done} of "
+                           f"{self.rows_total} rows).")
+
+    def stalled(self, stall_timeout):
+        return ExportError(f"Export {self.id} made no progress for {stall_timeout} s "
+                           f"(state {self.state}, {self.rows_done} of "
+                           f"{self.rows_total} rows).")
 
     def _restart(self, message):
         """Create the same export again and wait on the new job (one line of
@@ -527,7 +580,10 @@ class Client(UploadsMixin):
         self._check_protocol(resp)
         if resp.status_code in (200, 202, 500):
             body = self._body(resp)
-            if isinstance(body, dict) and (resp.status_code != 500 or "state" in body):
+            # A failed job answers 500 WITH its status (an export's "state", a
+            # dataset job's "status"); a bare 500 is an error page.
+            if isinstance(body, dict) and (resp.status_code != 500 or "state" in body
+                                           or "status" in body):
                 return body, getattr(resp, "headers", None) or {}
             if resp.status_code != 500:
                 return {}, getattr(resp, "headers", None) or {}
@@ -651,15 +707,22 @@ class Client(UploadsMixin):
     # ROW (WriteResult.rows / .refused); only a refusal of the whole request
     # raises WriteRefused. Each write returns a write_id that undo() reverses.
 
-    def _records(self, body, idempotency_key=None):
+    def _records_response(self, body, idempotency_key=None, path="/records/"):
+        """THE records POST: the raw response (a 401 raised). ``_records`` reads
+        it as one write's answer; the dataset helpers read the dataset shapes
+        from it (``geodb.datasets``)."""
         headers = self._headers()
         if idempotency_key:
             headers["Idempotency-Key"] = str(idempotency_key)
-        resp = self._session.post(self._url("/records/"), json=body, headers=headers,
+        resp = self._session.post(self._url(path), json=body, headers=headers,
                                   timeout=self.timeout)
         self._check_protocol(resp)
         if resp.status_code == 401:
             self._handle(resp)
+        return resp
+
+    def _records(self, body, idempotency_key=None):
+        resp = self._records_response(body, idempotency_key)
         if resp.status_code != 200:
             raise WriteRefused(resp.status_code, self._body(resp), resp.url)
         return WriteResult(self, self._body(resp) or {})

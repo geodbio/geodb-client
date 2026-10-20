@@ -291,3 +291,18 @@ def test_export_is_taught_for_analysis_never_to_check_an_import():
     for doc in (geodb.Client.export.__doc__, client_module.ExportJob.__doc__):
         assert "analysis" in doc.lower()
         assert "never to check an import" in " ".join(doc.split())
+
+
+# ── ONE poll loop (W7b): the dataset jobs wait on the same one ───────────────
+def test_export_wait_runs_on_the_shared_job_loop(clock, monkeypatch):
+    seen = []
+    real = client_module._wait_job
+
+    def spy(job, settle, **kw):
+        seen.append(type(job).__name__)
+        return real(job, settle, **kw)
+
+    monkeypatch.setattr(client_module, "_wait_job", spy)
+    gx, _s = _client(created(), running(), done())
+    gx.export("assay_results", project=12).wait()
+    assert seen == ["ExportJob"]
