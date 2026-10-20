@@ -664,10 +664,16 @@ class DatasetWrite(_Answer):
 
     def raise_for_stop(self):
         """Raise the stop as its typed exception (e.g.
-        :class:`geodb.DatasetPlanChanged`); return self when it did not stop."""
+        :class:`geodb.DatasetPlanChanged`); return self when it did not stop.
+        The stop block's ``status_code`` (the status its refusal carries on
+        its own) picks the class as a poll refusal's does
+        (:func:`_refusal_status`): a stop by a revoked key is the
+        :class:`geodb.AuthError` family (401), by a lowered key
+        :class:`geodb.WriteForbidden` (403); 409 when an older server names
+        none."""
         if not self.stopped:
             return self
-        raise write_refused_for(409, dict(self.stopped), None)
+        raise write_refused_for(_refusal_status(self.stopped), dict(self.stopped), None)
 
     def summary(self):
         """A plain-text account to tell the user: what landed, what did not,

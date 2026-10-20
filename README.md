@@ -414,7 +414,9 @@ when it answers the request itself: the poll names its original `status_code`, s
 re-sent), a 403 is `geodb.WriteForbidden` (`project_not_in_scope`, `write_access_insufficient`;
 also when the poll itself is refused because the key lost the project), and a 409 / 503 is its
 code's class above. (From a server that names no `status_code`, a refusal at the poll reads as
-409.)
+409.) A write's stop block names its `status_code` the same way, so `raise_for_stop()` raises a
+stop by a revoked key as the `geodb.AuthError` family and one by a lowered key as
+`geodb.WriteForbidden` (409 from a server that names none).
 
 A 429 `throttled` on a dataset request (the key's dataset rate, or the dataset jobs it already has
 queued or running) raises `geodb.WriteThrottled` (also a `geodb.Throttled`; `.retry_after`,

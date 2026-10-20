@@ -1054,6 +1054,92 @@ def test_a_403_on_the_detail_file_keeps_its_reason_code(clock, tmp_path):
     assert not (tmp_path / "d.parquet").exists()
 
 
+# ── W7d: a STOP carries its refusal's status_code too ───────────────────────
+# (server W9 final fix pass item 6, DatasetWriter._stopped: the stop block
+# names the HTTP status the stopping refusal carries on its own.)
+def stopped_with(code, status_code=None):
+    body = write_stopped(code)
+    if status_code is not None:
+        body["stopped"]["status_code"] = status_code
+    return body
+
+
+@pytest.mark.parametrize("code", ["grant_revoked", "grant_holder_removed", "grant_expired"])
+def test_a_stop_by_a_revoked_key_raises_the_auth_error_family(clock, code):
+    plan, _s = _plan([Resp(200, stopped_with(code, 401))])
+    done = plan.write()
+    assert done.status == "stopped"
+    with pytest.raises(geodb.AuthError) as caught:
+        done.raise_for_stop()
+    assert not isinstance(caught.value, geodb.WriteRefused)
+    assert caught.value.reason_code == code and caught.value.status_code == 401
+
+
+@pytest.mark.parametrize("code", ["project_not_in_scope", "write_access_insufficient"])
+def test_a_stop_by_a_lowered_key_raises_a_forbidden_write(clock, code):
+    plan, _s = _plan([Resp(200, stopped_with(code, 403))])
+    with pytest.raises(geodb.WriteForbidden) as caught:
+        plan.write().raise_for_stop()
+    assert isinstance(caught.value, geodb.PermissionDenied)
+    assert caught.value.reason_code == code and caught.value.status_code == 403
+
+
+def test_a_stop_named_409_is_its_code_as_before(clock):
+    plan, _s = _plan([Resp(200, stopped_with("dataset_plan_changed", 409))])
+    with pytest.raises(geodb.DatasetPlanChanged) as caught:
+        plan.write().raise_for_stop()
+    assert caught.value.status_code == 409
+
+
+@pytest.mark.parametrize("status_code", [None, "x", 200, 999])
+def test_a_stop_without_a_usable_status_code_reads_as_409(clock, status_code):
+    # An older server's stop block names no status_code.
+    plan, _s = _plan([Resp(200, stopped_with("write_access_insufficient", status_code))])
+    with pytest.raises(geodb.WriteRefused) as caught:
+        plan.write().raise_for_stop()
+    assert type(caught.value) is geodb.WriteRefused and caught.value.status_code == 409
+
+
+# ── the server's ABSOLUTE poll / detail.download paths ──────────────────────
+# (server W9 final fix pass item 5: poll_path / detail_path are absolute,
+# "/api/v2/records/datasets/<id>/", never joined twice onto the API root.)
+def test_an_absolute_poll_path_is_polled_on_the_configured_base_url(clock):
+    gx, s = _client(uploaded(812), queued(poll=f"/api/v2/records/datasets/{DS}/"),
+                    polling(), finished(answer()))
+    plan = gx.validate_dataset(12, {"Method": METHODS})
+    assert plan.plan_token == TOKEN
+    polls = [u for m, u, _k in s.calls if m == "GET"]
+    assert polls == [f"http://t/api/v2/records/datasets/{DS}/"] * 2
+
+
+def test_an_absolute_detail_download_path_is_fetched_once_on_the_api_root(clock, tmp_path):
+    class Blob:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size):
+            yield b"PAR1"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    detail = {"rows": 2, "expires_in_hours": 72,
+              "download": f"/api/v2/records/datasets/{DS}/detail/"}
+    gx, s = _client(uploaded(812), Resp(200, answer(detail=detail)),
+                    Resp(302, None, {"Location": "https://blob.example/detail?sig=1"}), Blob())
+    plan = gx.validate_dataset(12, {"Method": METHODS})
+    plan.download_detail(tmp_path / "d.parquet")
+    assert (tmp_path / "d.parquet").read_bytes() == b"PAR1"
+    get1, get2 = [c for c in s.calls if c[0] == "GET"]
+    assert get1[1] == f"http://t/api/v2/records/datasets/{DS}/detail/"
+    assert "headers" not in get2[2]
+
+
 # ── W7d: dataset_project_busy is re-sent ONCE by default ────────────────────
 # Each server wait behind another dataset job on the project can be 30 min.
 def busy_project_cycle(n):
