@@ -21,7 +21,7 @@ import time
 from ._tls import new_session
 from .errors import (AuthError, NotFoundError, APIError, ExportConcurrency, ExportError,
                      ExportInterrupted, ProtocolVersionMismatch, Throttled, WriteRefused,
-                     error_for)
+                     error_for, write_refused_for)
 from .uploads import UploadsMixin
 from .writes import WriteResult, rows_from
 
@@ -724,7 +724,8 @@ class Client(UploadsMixin):
     def _records(self, body, idempotency_key=None):
         resp = self._records_response(body, idempotency_key)
         if resp.status_code != 200:
-            raise WriteRefused(resp.status_code, self._body(resp), resp.url)
+            raise write_refused_for(resp.status_code, self._body(resp), resp.url,
+                                    headers=getattr(resp, "headers", None))
         return WriteResult(self, self._body(resp) or {})
 
     def describe(self, model, project=None):

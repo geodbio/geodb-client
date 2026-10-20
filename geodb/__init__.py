@@ -25,6 +25,10 @@ from .errors import (
     ProjectRequired, CompanyRequired, SetChoiceRequired, Conflict, Throttled, ExportError,
     ExportConcurrency, ExportInterrupted,
     ProtocolVersionMismatch, WriteRefused, RowsRefused,
+    DatasetRefused, DatasetFileUnreadable, DatasetColumnForbidden, DatasetTooLarge,
+    DatasetNotGrouped, DatasetPlanInvalid, DatasetPlanExpired, DatasetPlanChanged,
+    DatasetFileChanged, DatasetAlreadyWritten, DatasetBusy, DatasetInProgress,
+    DatasetRowsBusy, DatasetWriteFailed,
 )
 from .uploads import StorageUnreachable
 from .writes import WriteResult
@@ -37,5 +41,9 @@ __all__ = [
     "InvalidRequest", "ProjectRequired", "CompanyRequired", "SetChoiceRequired",
     "Conflict", "Throttled", "ExportError", "ExportConcurrency", "ExportInterrupted", "WriteRefused", "RowsRefused", "WriteResult",
     "StorageUnreachable",
+    "DatasetRefused", "DatasetFileUnreadable", "DatasetColumnForbidden", "DatasetTooLarge",
+    "DatasetNotGrouped", "DatasetPlanInvalid", "DatasetPlanExpired", "DatasetPlanChanged",
+    "DatasetFileChanged", "DatasetAlreadyWritten", "DatasetBusy", "DatasetInProgress",
+    "DatasetRowsBusy", "DatasetWriteFailed",
     "__version__",
 ]

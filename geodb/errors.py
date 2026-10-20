@@ -210,3 +210,136 @@ class RowsRefused(WriteRefused):
                            f"{first.get('detail') or first.get('reason_code')}")
         super().__init__(200, first, url)
         self.rows = rows
+
+
+# ── The dataset dry run (protocol import efficiency W6; client W7b) ──────────
+class DatasetRefused(WriteRefused):
+    """A dataset request (``validate_dataset``, ``DatasetPlan.write``,
+    ``DatasetWrite.rehearse_rest``) refused WHOLE — nothing was written by
+    it. One subclass per dataset reason code (:data:`DATASET_REASON_CODES`);
+    act on ``remedy``, read ``offending``. A member that STOPS a write is not
+    raised: it is ``DatasetWrite.stopped`` (``raise_for_stop()`` raises it as
+    one of these)."""
+
+    #: A sentence the client adds to the server's message (what to do here).
+    hint = None
+
+    def __init__(self, status_code, body, url=None):
+        super().__init__(status_code, body, url)
+        if self.hint:
+            self.args = (f"{self.args[0]} {self.hint}",)
+
+
+class DatasetFileUnreadable(DatasetRefused):
+    """``dataset_file_unreadable``: a member is not a UTF-8 CSV with one
+    header row (``offending.reason``: not_csv · not_utf8 · no_header · header
+    · malformed; ``offending.line``)."""
+
+
+class DatasetColumnForbidden(DatasetRefused):
+    """``dataset_column_forbidden``: a member file carries a column only the
+    request may carry (project, dry_run, acknowledge, confirm, qc_mapping,
+    plan_token, intent, model) — consent never comes from a file."""
+
+
+class DatasetTooLarge(DatasetRefused):
+    """``dataset_too_large``: past a limit (``offending.limit`` names it,
+    ``offending.max`` gives it). Split the work into several datasets."""
+
+
+class DatasetNotGrouped(DatasetRefused):
+    """``dataset_not_grouped``: an Assay member's certificates (or another
+    long-form member's records) are split; sort the frame and validate again."""
+
+
+class DatasetPlanInvalid(DatasetRefused):
+    """``dataset_plan_invalid``: the write names no plan this key approved
+    (send the rehearsal's ``write`` body exactly as returned —
+    ``DatasetPlan.write()`` does)."""
+
+
+class DatasetPlanExpired(DatasetRefused):
+    """``dataset_plan_expired``: the approved plan is over 24 hours old."""
+
+    hint = ("Re-validate: run validate_dataset again (the uploaded files can be reused "
+            "by their document ids), show the user the new answer, and write that plan "
+            "only after their yes.")
+
+
+class DatasetPlanChanged(DatasetRefused):
+    """``dataset_plan_changed``: the data moved since the rehearsal the user
+    approved, so a member would no longer land as approved. Nothing of it
+    landed; ``offending`` compares the approved summary with today's."""
+
+
+class DatasetFileChanged(DatasetRefused):
+    """``dataset_file_changed``: a member file is no longer the one approved
+    (its bytes changed, or it was trashed / undone)."""
+
+
+class DatasetAlreadyWritten(DatasetRefused):
+    """``dataset_already_written``: the plan landed already (or was undone);
+    a plan is never landed twice. ``write_id`` names the write."""
+
+    @property
+    def write_id(self):
+        return (self.offending or {}).get("write_id")
+
+
+class DatasetBusy(DatasetRefused):
+    """A dataset refusal whose remedy is to send the same request again after
+    ``retry_after`` seconds (the server's ``Retry-After``, when it sent one).
+    The dataset helpers already re-send a bounded number of times."""
+
+    retry_after = None
+
+
+class DatasetInProgress(DatasetBusy):
+    """``dataset_in_progress``: this plan is being written right now by
+    another request (the same write sent twice)."""
+
+
+class DatasetRowsBusy(DatasetBusy):
+    """``dataset_rows_busy``: another write held rows the dataset changes; the
+    server stopped after a few seconds rather than make that person wait."""
+
+
+class DatasetWriteFailed(DatasetRefused):
+    """``dataset_write_failed``: a member stopped on an unexpected server
+    error; nothing of it landed (members before it may have)."""
+
+
+#: dataset reason_code -> exception class (the README's table reads it).
+DATASET_REASON_CODES = {
+    "dataset_file_unreadable": DatasetFileUnreadable,
+    "dataset_column_forbidden": DatasetColumnForbidden,
+    "dataset_too_large": DatasetTooLarge,
+    "dataset_not_grouped": DatasetNotGrouped,
+    "dataset_rows_busy": DatasetRowsBusy,
+    "dataset_plan_invalid": DatasetPlanInvalid,
+    "dataset_plan_expired": DatasetPlanExpired,
+    "dataset_plan_changed": DatasetPlanChanged,
+    "dataset_file_changed": DatasetFileChanged,
+    "dataset_already_written": DatasetAlreadyWritten,
+    "dataset_in_progress": DatasetInProgress,
+    "dataset_write_failed": DatasetWriteFailed,
+}
+
+
+def write_refused_for(status_code, body, url=None, *, headers=None):
+    """THE exception for a refused records request: the dataset class its
+    ``reason_code`` names, else :class:`WriteRefused`; a :class:`DatasetBusy`
+    carries the server's ``Retry-After``."""
+    code = body.get("reason_code") if isinstance(body, dict) else None
+    exc = DATASET_REASON_CODES.get(code, WriteRefused)(status_code, body, url)
+    if isinstance(exc, DatasetBusy):
+        exc.retry_after = _retry_after_header(headers)
+    return exc
+
+
+def _retry_after_header(headers):
+    try:
+        value = int((headers or {}).get("Retry-After"))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
