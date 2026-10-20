@@ -232,16 +232,20 @@ class DatasetJob:
     """A dataset rehearsal, write or undo the server runs in the background
     (it answered a poll handle). :meth:`wait` polls it with THE loop
     :meth:`geodb.client.ExportJob.wait` uses — the server's ``Retry-After``,
-    ``on_progress`` after every poll, a stall clock, a hard cap. While it runs,
-    ``state``, ``kind``, ``member`` / ``model``, ``rows_done`` / ``rows_total``
-    are refreshed on the job."""
+    ``on_progress`` after every poll, a stall clock, a hard cap. ``kind``
+    (rehearsal · write · undo) is the queued handle's; while it runs,
+    ``state``, ``member`` (its position) of ``members``, ``model``,
+    ``rows_done`` / ``rows_total`` and ``waiting_for`` (set while it waits its
+    turn behind another dataset job on the project, else None) are refreshed
+    on the job. Waiting its turn is not a stall: only the hard cap runs."""
 
     def __init__(self, client, handle):
         self._client = client
         self.id = handle.get("id")
         self.kind = handle.get("kind")
         self.state = handle.get("status") or "queued"
-        self.member = self.model = self.rows_done = self.rows_total = None
+        self.member = self.members = self.model = self.rows_done = self.rows_total = None
+        self.waiting_for = None
         self.progress = {}
         self.retry_after = None
         self.result = None
@@ -266,9 +270,11 @@ class DatasetJob:
         progress = data.get("progress")
         if isinstance(progress, dict):
             self.progress = progress
-            for key in ("member", "model", "rows_done", "rows_total"):
+            for key in ("member", "members", "model", "rows_done", "rows_total"):
                 if key in progress:
                     setattr(self, key, progress[key])
+            # The server names it only while the job waits its turn.
+            self.waiting_for = progress.get("waiting_for") or None
         self.retry_after = _retry_after(headers) if self.state in _JOB_INFLIGHT else None
         return data
 
@@ -301,7 +307,7 @@ class DatasetJob:
 
     # -- what _wait_job asks of a job -----------------------------------------
     def progress_key(self):
-        return (self.state, self.member, self.model, self.rows_done)
+        return (self.state, self.member, self.members, self.model, self.rows_done)
 
     def timed_out(self, timeout):
         return DatasetJobFailed(self.id, f"Dataset job {self.id} did not finish within "

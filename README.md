@@ -372,8 +372,10 @@ again = done.rehearse_rest()        # after a stop: rehearse what is left (same 
   Each is uploaded as a document (category OT); an upload no completed write uses goes to the
   Trash after 7 days.
 - **A large dataset runs in the background**: the rehearsal (and the write, and a large undo) is
-  polled the way exports are — the server's `Retry-After`, `on_progress(job)` with `job.model`,
-  `job.rows_done`, `job.rows_total`, a stall timeout.
+  polled the way exports are — the server's `Retry-After`, `on_progress(job)` with `job.kind`
+  (rehearsal · write · undo), `job.member` of `job.members`, `job.model`, `job.rows_done`,
+  `job.rows_total` and `job.waiting_for` (set while it waits its turn behind another dataset job on
+  the project — not a stall; only the hard cap runs), a stall timeout.
 - **The write lands member by member**, each in its own commit and each re-checked against what
   the user approved. A member that would land differently STOPS the write: the answer names what
   landed and what did not (a `DatasetWrite`, not an exception; `raise_for_stop()` raises it). The

@@ -325,7 +325,9 @@ def test_the_detail_file_downloads_through_the_redirect_without_the_key(clock, t
 
 # ── the queued answer: THE poll loop ────────────────────────────────────────
 def queued(kind="rehearsal", poll=f"records/datasets/{DS}/"):
-    return Resp(202, {"dataset": {"id": DS, "status": "queued", "poll": poll}})
+    # The server's handle (dataset_lane.handle): {"dataset": {id, kind, status, poll}}
+    return Resp(202, {"dataset": {"id": DS, "kind": kind, "status": "queued", "poll": poll}},
+                {"Retry-After": "10"})
 
 
 def polling(member="Assay", rows_done=0, rows_total=100, retry_after="10", kind="rehearsal"):
@@ -359,6 +361,49 @@ def test_a_queued_rehearsal_is_polled_with_retry_after_and_progress(clock, monke
     assert progress == [("running", "Assay", 10), ("running", "Assay", 60), ("done", "Assay", 60)]
     polls = [u for m, u, _k in s.calls if m == "GET"]
     assert polls == [f"http://t/api/v2/records/datasets/{DS}/"] * 3
+
+
+def waiting(retry_after="10", members=3):
+    """A rail job waiting its turn on the project (dataset_lane.progress_of)."""
+    return Resp(202, {"id": DS, "kind": "rehearsal", "status": "running",
+                      "progress": {"member": None, "members": members, "model": None,
+                                   "rows_done": 0, "rows_total": 900,
+                                   "waiting_for": "another dataset job on this project"}},
+                {"Retry-After": retry_after})
+
+
+def test_the_job_takes_the_handles_kind_and_the_progress_members_and_waiting_for(clock):
+    seen = []
+    gx, _s = _client(uploaded(812), queued(kind="rehearsal"), waiting(),
+                     polling(rows_done=10), finished(answer()))
+    gx.validate_dataset(12, {"Method": METHODS}, on_progress=lambda j: seen.append(
+        (j.kind, j.members, j.waiting_for, j.rows_done)))
+    assert seen == [("rehearsal", 3, "another dataset job on this project", 0),
+                    ("rehearsal", 3, None, 10),             # waiting_for clears when absent
+                    ("rehearsal", 3, None, 10)]
+    job = datasets.DatasetJob(gx, {"id": DS, "kind": "write", "status": "queued",
+                                   "poll": f"records/datasets/{DS}/"})
+    assert job.kind == "write" and job.members is None and job.waiting_for is None
+    gx2, _s2 = _client(polling(kind="undo"))
+    bare = datasets.DatasetJob(gx2, {"id": DS, "status": "queued"})   # a handle with no kind
+    bare.status()
+    assert bare.kind == "undo"                                         # the poll names it
+
+
+def test_waiting_its_turn_on_the_project_is_not_a_stall(clock):
+    # The server waits up to 30 min for another dataset job on the project,
+    # with nothing else moving: only the hard cap applies while waiting_for.
+    gx, _s = _client(uploaded(812), queued(), *[waiting() for _ in range(30)],
+                     finished(answer()))
+    plan = gx.validate_dataset(12, {"Method": METHODS}, stall_timeout=60)
+    assert plan.plan_token == TOKEN
+    assert sum(clock.sleeps) == 300
+
+
+def test_waiting_still_runs_out_the_hard_cap(clock):
+    gx, _s = _client(uploaded(812), queued(), *[waiting() for _ in range(30)])
+    with pytest.raises(geodb.DatasetJobFailed, match="did not finish within 100"):
+        gx.validate_dataset(12, {"Method": METHODS}, stall_timeout=60, timeout=100)
 
 
 def test_a_poll_link_on_another_host_is_never_followed(clock):

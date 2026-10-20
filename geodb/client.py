@@ -315,8 +315,11 @@ def _wait_job(job, settle, *, poll_seconds=None, timeout=3 * 3600, stall_timeout
       smaller ``poll_seconds`` is raised to it); a 429 ``throttled`` poll waits
       its own ``Retry-After`` and polls again;
     * ``stall_timeout``: give up when ``job.progress_key()`` did not change for
-      that long (``job.stalled(stall_timeout)`` is raised); ``timeout`` is the
-      hard cap on the whole wait (``job.timed_out(timeout)``)."""
+      that long (``job.stalled(stall_timeout)`` is raised) — except while the
+      server says the job is waiting its turn (``job.waiting_for``, a dataset
+      job queued behind another on its project: up to 30 min of nothing
+      moving, by design); ``timeout`` is the hard cap on the whole wait
+      (``job.timed_out(timeout)``)."""
     clock = time.monotonic
     start = last_moved = clock()
     last_seen = None
@@ -337,7 +340,7 @@ def _wait_job(job, settle, *, poll_seconds=None, timeout=3 * 3600, stall_timeout
             if verdict is not _PENDING:
                 return verdict
             seen = job.progress_key()
-            if seen != last_seen:
+            if seen != last_seen or getattr(job, "waiting_for", None):
                 last_seen, last_moved = seen, clock()
         now = clock()
         if now - start >= timeout:
