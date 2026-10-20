@@ -74,6 +74,11 @@ BUSY_FALLBACK_SECONDS = 60
 PROJECT_BUSY_FALLBACK_SECONDS = 300
 #: A 429 ``throttled`` with no Retry-After (the server's cap answer names 30).
 THROTTLED_FALLBACK_SECONDS = 30
+#: How many times ``dataset_project_busy`` is re-sent by default
+#: (``project_busy_retries``): each re-send can wait up to 30 min on the
+#: server again (``PROJECT_LOCK_WAIT_SECONDS``) behind another dataset job on
+#: the project, so the bound is 1, not ``busy_retries``' 3.
+PROJECT_BUSY_RETRIES = 1
 _FALLBACK_SECONDS = {"dataset_project_busy": PROJECT_BUSY_FALLBACK_SECONDS,
                      "throttled": THROTTLED_FALLBACK_SECONDS}
 #: The longest wait the helpers sleep before a re-send. The per-key rate is
@@ -459,7 +464,8 @@ class DatasetPlan(_Answer):
         return self._client._download(self._client._url(job.poll_path), path, records=True)
 
     def write(self, *, on_progress=None, poll_seconds=None, timeout=3 * 3600,
-              stall_timeout=900, busy_retries=3, idempotency_key=None, restart_interrupted=1):
+              stall_timeout=900, busy_retries=3, idempotency_key=None, restart_interrupted=1,
+              project_busy_retries=PROJECT_BUSY_RETRIES):
         """Write this plan — ONLY after the user said yes to it.
 
         Sends the rehearsal's ``write`` body verbatim (it names the approved
@@ -474,7 +480,10 @@ class DatasetPlan(_Answer):
 
         A stop on busy rows (``dataset_rows_busy``) is sent again up to
         ``busy_retries`` times, with a warning each time (a re-send lands only
-        what has not landed). A background write the server reports
+        what has not landed). A write refused ``dataset_project_busy`` (it
+        waited up to 30 min behind another dataset job on the project) is sent
+        again ``project_busy_retries`` times (default 1: each re-send can wait
+        30 min again). A background write the server reports
         interrupted (:class:`geodb.DatasetInterrupted`) is sent again once
         (``restart_interrupted``; it lands only the members that have not
         landed), with a warning. Refused before anything landed: a plan over 24 h
@@ -488,7 +497,8 @@ class DatasetPlan(_Answer):
                              "sealed): there is nothing to write")
         send = dict(self._send, on_progress=on_progress, poll_seconds=poll_seconds,
                     timeout=timeout, stall_timeout=stall_timeout, busy_retries=busy_retries,
-                    restart_interrupted=restart_interrupted)
+                    restart_interrupted=restart_interrupted,
+                    project_busy_retries=project_busy_retries)
         attempt = 0
         while True:
             # A 200 answer is replayed for the same Idempotency-Key, so a
@@ -693,7 +703,8 @@ class DatasetsMixin:
     def validate_dataset(self, project, members, intent="create", *, acknowledge=None,
                          qc_mapping=None, on_progress=None, poll_seconds=None,
                          timeout=3 * 3600, stall_timeout=900, busy_retries=3,
-                         idempotency_key=None, restart_interrupted=1):
+                         idempotency_key=None, restart_interrupted=1,
+                         project_busy_retries=PROJECT_BUSY_RETRIES):
         """Rehearse a whole DATASET — several record types that depend on one
         another (new laboratories, methods with their detection limits,
         certificates, QC samples, and the assays, samples or logging rows that
@@ -724,9 +735,11 @@ class DatasetsMixin:
 
         A refusal of the whole request raises a :class:`geodb.DatasetRefused`
         subclass (``DatasetFileUnreadable``, ``DatasetTooLarge`` …); busy rows
-        (``dataset_rows_busy``) and a project busy with another dataset job
-        (``dataset_project_busy``) are re-sent up to ``busy_retries`` times after
-        the server's ``Retry-After``, with a warning each time; a background
+        (``dataset_rows_busy``) are re-sent up to ``busy_retries`` times after
+        the server's ``Retry-After``, with a warning each time; a project busy
+        with another dataset job (``dataset_project_busy``: the job already
+        waited up to 30 min for it) up to ``project_busy_retries`` times
+        (default 1, since each re-send can wait 30 min again); a background
         job the server reports interrupted (``dataset_interrupted``) is sent
         again once (``restart_interrupted``), with a warning."""
         if intent not in INTENTS:
@@ -755,13 +768,14 @@ class DatasetsMixin:
             body["qc_mapping"] = qc_mapping
         send = {"on_progress": on_progress, "poll_seconds": poll_seconds, "timeout": timeout,
                 "stall_timeout": stall_timeout, "busy_retries": busy_retries,
-                "restart_interrupted": restart_interrupted}
+                "restart_interrupted": restart_interrupted,
+                "project_busy_retries": project_busy_retries}
         data = self._send_dataset(body, idempotency_key=idempotency_key, **send)
         return DatasetPlan(self, data, send)
 
     def _send_dataset(self, body, *, idempotency_key=None, accept_stop=False, on_progress=None,
                       poll_seconds=None, timeout=3 * 3600, stall_timeout=900, busy_retries=3,
-                      restart_interrupted=1):
+                      restart_interrupted=1, project_busy_retries=PROJECT_BUSY_RETRIES):
         """THE dataset request (rehearsal, write, undo, rehearse_rest): POST
         ``ROUTES["records"]`` → the answer body. A poll handle is waited for
         (:class:`DatasetJob`, THE poll loop); ``accept_stop`` returns a write's
@@ -772,7 +786,8 @@ class DatasetsMixin:
           429 ``throttled`` — the key's rate, or its cap on jobs in flight) is
           re-sent after its Retry-After (else :data:`BUSY_FALLBACK_SECONDS`, or
           the code's own :data:`_FALLBACK_SECONDS`), up to ``busy_retries``
-          times, out loud — never after a wait past
+          times (``dataset_project_busy``: ``project_busy_retries``, default
+          :data:`PROJECT_BUSY_RETRIES`), out loud — never after a wait past
           :data:`MAX_RESEND_WAIT_SECONDS` (raised instead, with ``retry_after``);
         * ``dataset_interrupted`` (:data:`_RESTART_CODES`) is re-sent at once,
           up to ``restart_interrupted`` times (default once), out loud;
@@ -789,7 +804,8 @@ class DatasetsMixin:
         answer the same finished job — so that re-send carries a new key."""
         from .client import _pause
         key = idempotency_key or f"dataset-{uuid.uuid4()}"
-        attempt = restarts = switched = 0
+        restarts = switched = 0
+        resent = {}                                   # retry code -> re-sends so far
         while True:
             resp = self._records_response(body, key, path=ROUTES["records"])
             data = self._body(resp)
@@ -826,14 +842,19 @@ class DatasetsMixin:
                               f"off on the server); sending it again ONCE in {wait} s, as the "
                               f"server's Retry-After says.", RuntimeWarning, stacklevel=3)
                 _pause(wait)
-            elif exc.reason_code in _RETRY_CODES and attempt < busy_retries and (
+            elif exc.reason_code in _RETRY_CODES and (
                     wait is None or wait <= MAX_RESEND_WAIT_SECONDS):
-                attempt += 1
+                project = exc.reason_code == "dataset_project_busy"
+                bound = project_busy_retries if project else busy_retries
+                count = "project" if project else "busy"
+                if resent.get(count, 0) >= bound:
+                    raise exc
+                resent[count] = attempt = resent.get(count, 0) + 1
                 if wait is None:
                     wait = _FALLBACK_SECONDS.get(exc.reason_code, BUSY_FALLBACK_SECONDS)
                 warnings.warn(f"geodb-client: the dataset request was refused {exc.reason_code}; "
                               f"sending it again in {wait} s (attempt {attempt} of "
-                              f"{busy_retries}).", RuntimeWarning, stacklevel=3)
+                              f"{bound}).", RuntimeWarning, stacklevel=3)
                 _pause(wait)
             else:
                 raise exc

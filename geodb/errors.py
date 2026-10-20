@@ -331,7 +331,9 @@ class DatasetProjectBusy(DatasetBusy):
     the same project (``waited_seconds``), then stopped. Nothing of it was
     written. It arrives at the job's poll, which carries no ``Retry-After``:
     the dataset helpers send the same request again after
-    ``geodb.datasets.PROJECT_BUSY_FALLBACK_SECONDS`` (bounded, warns)."""
+    ``geodb.datasets.PROJECT_BUSY_FALLBACK_SECONDS``, ``project_busy_retries``
+    times (default 1: each re-send can wait 30 min on the server again;
+    warns)."""
 
     @property
     def waited_seconds(self):

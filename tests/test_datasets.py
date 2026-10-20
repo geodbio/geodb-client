@@ -689,7 +689,7 @@ def test_project_busy_past_the_bound_raises_its_exception(clock):
                      queued(), failed_at_poll("dataset_project_busy"))
     with pytest.warns(RuntimeWarning):
         with pytest.raises(geodb.DatasetProjectBusy) as caught:
-            gx.validate_dataset(12, {"Method": METHODS}, busy_retries=1)
+            gx.validate_dataset(12, {"Method": METHODS})          # project_busy_retries=1
     assert caught.value.waited_seconds is None and caught.value.status_code == 409
 
 
@@ -1052,3 +1052,72 @@ def test_a_403_on_the_detail_file_keeps_its_reason_code(clock, tmp_path):
         plan.download_detail(tmp_path / "d.parquet")
     assert caught.value.reason_code == "project_not_in_scope"
     assert not (tmp_path / "d.parquet").exists()
+
+
+# ── W7d: dataset_project_busy is re-sent ONCE by default ────────────────────
+# Each server wait behind another dataset job on the project can be 30 min.
+def busy_project_cycle(n):
+    out = []
+    for _ in range(n):
+        out += [queued(), failed_at_poll("dataset_project_busy", waited_seconds=1800)]
+    return out
+
+
+def test_project_busy_is_re_sent_once_by_default_whatever_busy_retries_says(clock):
+    gx, s = _client(uploaded(812), *busy_project_cycle(2))
+    with pytest.warns(RuntimeWarning, match="dataset_project_busy"):
+        with pytest.raises(geodb.DatasetProjectBusy) as caught:
+            gx.validate_dataset(12, {"Method": METHODS}, busy_retries=5)
+    assert caught.value.waited_seconds == 1800
+    assert len(_records_kw(s)) == 2                                 # sent, then ONCE again
+    assert clock.sleeps.count(datasets.PROJECT_BUSY_FALLBACK_SECONDS) == 1
+
+
+def test_busy_retries_zero_still_re_sends_project_busy_once(clock):
+    gx, s = _client(uploaded(812), *busy_project_cycle(1), Resp(200, answer()))
+    with pytest.warns(RuntimeWarning, match="dataset_project_busy"):
+        plan = gx.validate_dataset(12, {"Method": METHODS}, busy_retries=0)
+    assert plan.plan_token == TOKEN and len(_records_kw(s)) == 2
+
+
+def test_project_busy_retries_zero_raises_at_the_first(clock):
+    gx, s = _client(uploaded(812), *busy_project_cycle(1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(geodb.DatasetProjectBusy):
+            gx.validate_dataset(12, {"Method": METHODS}, project_busy_retries=0)
+    assert len(_records_kw(s)) == 1 and clock.sleeps == []
+
+
+def test_project_busy_retries_is_overridable_on_the_write(clock):
+    plan, s = _plan([*[r for _ in range(2) for r in (queued(kind="write"),
+                                                     failed_at_poll("dataset_project_busy",
+                                                                    kind="write"))],
+                     Resp(200, write_done())])
+    with pytest.warns(RuntimeWarning):
+        done = plan.write(project_busy_retries=2)
+    assert done.status == "done" and len(_records_kw(s)) == 4      # rehearsal + 3 writes
+
+
+def test_the_undo_inherits_project_busy_retries(clock):
+    plan, s = _plan([Resp(200, write_done()), queued(kind="undo"),
+                     failed_at_poll("dataset_project_busy", kind="undo")])
+    done = plan.write()
+    with pytest.raises(geodb.DatasetProjectBusy):
+        done.undo(project_busy_retries=0)
+    assert len(_records_kw(s)) == 3
+
+
+def test_the_docstrings_say_why_project_busy_is_re_sent_once():
+    for fn in (geodb.Client.validate_dataset, datasets.DatasetPlan.write):
+        doc = " ".join(fn.__doc__.split())
+        assert "project_busy_retries" in doc and "30 min" in doc
+
+
+def test_project_busy_and_rows_busy_keep_their_own_budgets(clock):
+    gx, s = _client(uploaded(812), *busy_project_cycle(1), queued(),
+                    failed_at_poll("dataset_rows_busy"), Resp(200, answer()))
+    with pytest.warns(RuntimeWarning):
+        plan = gx.validate_dataset(12, {"Method": METHODS}, busy_retries=1,
+                                   project_busy_retries=1)
+    assert plan.plan_token == TOKEN and len(_records_kw(s)) == 3

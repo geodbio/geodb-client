@@ -45,7 +45,7 @@ def _meaning(cls):
 
 def render_datasets():
     from geodb.datasets import (_RESTART_CODES, _RETRY_CODES, _RETRY_STOPS,
-                                SWITCHED_OFF_RETRIES)
+                                PROJECT_BUSY_RETRIES, SWITCHED_OFF_RETRIES)
     from geodb.errors import (DATASET_REASON_CODES, RECORDS_REASON_CODES, WriteForbidden,
                               WritesSwitchedOff)
     lines = ["| Reason code | Exception | Means | The client |", "|---|---|---|---|"]
@@ -56,6 +56,9 @@ def render_datasets():
                     "`DatasetWrite.stopped`")
         elif issubclass(cls, WriteForbidden):
             does = "raises; never sent again"
+        elif code == "dataset_project_busy":
+            does = (f"sends again {PROJECT_BUSY_RETRIES}× by default (`project_busy_retries`: "
+                    "each server wait can be 30 min), warns, then raises")
         elif code in _RETRY_CODES and code in _RETRY_STOPS:
             does = ("sends again after `Retry-After` (bounded, warns) — a refused request "
                     "and a write that stopped on it alike")
