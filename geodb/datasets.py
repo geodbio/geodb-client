@@ -58,7 +58,7 @@ _JOB_FAILED = ("error", "failed", "cancelled", "canceled")
 #: (``dataset_project_busy``: "again later" — a background job that waited its
 #: turn on the project as long as it may).
 _RETRY_CODES = ("dataset_in_progress", "dataset_rows_busy", "dataset_project_busy",
-                "idempotency_in_progress")
+                "idempotency_in_progress", "throttled")
 #: The refusals whose remedy is "send the same request again" ONCE, at once:
 #: the background job ended without finishing (the export rule:
 #: ``ExportJob.wait(restart_interrupted=1)``). Never a busy wait.
@@ -72,7 +72,14 @@ BUSY_FALLBACK_SECONDS = 60
 #: Retry-After: the server's own number for it (``DATASET_RETRY_AFTER_SECONDS``
 #: × 10 on the refusal it raises in the job) — the job had already waited 30 min.
 PROJECT_BUSY_FALLBACK_SECONDS = 300
-_FALLBACK_SECONDS = {"dataset_project_busy": PROJECT_BUSY_FALLBACK_SECONDS}
+#: A 429 ``throttled`` with no Retry-After (the server's cap answer names 30).
+THROTTLED_FALLBACK_SECONDS = 30
+_FALLBACK_SECONDS = {"dataset_project_busy": PROJECT_BUSY_FALLBACK_SECONDS,
+                     "throttled": THROTTLED_FALLBACK_SECONDS}
+#: The longest wait the helpers sleep before a re-send. The per-key rate is
+#: per HOUR, so its Retry-After can be most of an hour: past this, the refusal
+#: is raised with its ``retry_after`` and the caller decides (tell the user).
+MAX_RESEND_WAIT_SECONDS = 600
 
 
 # ── A member file: one model per UTF-8 CSV (server plan §6.2) ────────────────
@@ -733,9 +740,12 @@ class DatasetsMixin:
         stop answer even when it came with a refusal status; anything else
         raises its typed exception, except:
 
-        * a "send it again" refusal (:data:`_RETRY_CODES`) is re-sent after its
-          Retry-After (else :data:`BUSY_FALLBACK_SECONDS`, or the code's own
-          :data:`_FALLBACK_SECONDS`), up to ``busy_retries`` times, out loud;
+        * a "send it again" refusal (:data:`_RETRY_CODES`: the busy codes and a
+          429 ``throttled`` — the key's rate, or its cap on jobs in flight) is
+          re-sent after its Retry-After (else :data:`BUSY_FALLBACK_SECONDS`, or
+          the code's own :data:`_FALLBACK_SECONDS`), up to ``busy_retries``
+          times, out loud — never after a wait past
+          :data:`MAX_RESEND_WAIT_SECONDS` (raised instead, with ``retry_after``);
         * ``dataset_interrupted`` (:data:`_RESTART_CODES`) is re-sent at once,
           up to ``restart_interrupted`` times (default once), out loud.
 
@@ -774,7 +784,8 @@ class DatasetsMixin:
                               f"(error_id={exc.error_id}); sending the same request again "
                               f"(restart {restarts} of {restart_interrupted}).",
                               RuntimeWarning, stacklevel=3)
-            elif exc.reason_code in _RETRY_CODES and attempt < busy_retries:
+            elif exc.reason_code in _RETRY_CODES and attempt < busy_retries and (
+                    wait is None or wait <= MAX_RESEND_WAIT_SECONDS):
                 attempt += 1
                 if wait is None:
                     wait = _FALLBACK_SECONDS.get(exc.reason_code, BUSY_FALLBACK_SECONDS)

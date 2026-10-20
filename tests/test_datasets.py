@@ -646,6 +646,64 @@ def test_an_interrupted_undo_is_sent_again_once(clock):
                                                               "dry_run": False}
 
 
+# ── W7c: 429 throttled (the per-key rate, the cap on jobs in flight) ────────
+def throttled(retry_after="30", **offending):
+    return Resp(429, {"reason_code": "throttled", "detail": "Request was throttled.",
+                      "remedy": "Wait for the interval given in the Retry-After header.",
+                      "offending": offending or None},
+                {"Retry-After": retry_after} if retry_after else {})
+
+
+def test_a_throttled_rehearsal_waits_retry_after_and_resends_the_same_request_and_key(clock):
+    gx, s = _client(uploaded(812), throttled("30", in_flight=2, limit=2), Resp(200, answer()))
+    with pytest.warns(RuntimeWarning, match="throttled"):
+        plan = gx.validate_dataset(12, {"Method": METHODS})
+    assert plan.plan_token == TOKEN
+    assert clock.sleeps == [30]
+    a, b = _records_kw(s)
+    assert a["json"] == b["json"]
+    # a 429 is not stored under the key (only a 2xx is): the same key runs for real
+    assert a["headers"]["Idempotency-Key"] == b["headers"]["Idempotency-Key"]
+
+
+def test_a_throttled_write_is_resent_verbatim_under_the_same_key(clock):
+    plan, s = _plan([throttled("12"), Resp(200, write_done())])
+    with pytest.warns(RuntimeWarning, match="throttled"):
+        done = plan.write()
+    assert done.status == "done"
+    first, second = _records_kw(s)[-2:]
+    assert first["json"] == second["json"] == WRITE_BODY
+    assert first["headers"]["Idempotency-Key"] == second["headers"]["Idempotency-Key"]
+    assert clock.sleeps == [12]
+
+
+def test_throttled_without_retry_after_waits_the_fallback(clock):
+    gx, _s = _client(uploaded(812), throttled(None), Resp(200, answer()))
+    with pytest.warns(RuntimeWarning):
+        gx.validate_dataset(12, {"Method": METHODS})
+    assert clock.sleeps == [datasets.THROTTLED_FALLBACK_SECONDS]
+
+
+def test_a_wait_past_the_ceiling_is_raised_never_slept(clock):
+    # The rate is per hour: its Retry-After can be most of an hour. The client
+    # never blocks that long on its own; the caller gets the wait.
+    gx, s = _client(uploaded(812), throttled("3400"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(geodb.WriteThrottled) as caught:
+            gx.validate_dataset(12, {"Method": METHODS})
+    assert caught.value.retry_after == 3400
+    assert clock.sleeps == [] and len(_records_kw(s)) == 1
+
+
+def test_throttled_past_the_bound_raises(clock):
+    gx, s = _client(uploaded(812), throttled("5"), throttled("5"))
+    with pytest.warns(RuntimeWarning):
+        with pytest.raises(geodb.WriteThrottled):
+            gx.validate_dataset(12, {"Method": METHODS}, busy_retries=1)
+    assert len(_records_kw(s)) == 2
+
+
 # ── the one Undo ────────────────────────────────────────────────────────────
 def test_undo_is_one_request_for_the_whole_dataset(clock):
     undone = {"intent": "undo", "write_id": "u-1", "complete": True, "summary": {"undone": 3},

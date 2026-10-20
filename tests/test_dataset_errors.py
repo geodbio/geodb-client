@@ -108,3 +108,18 @@ def test_project_busy_is_the_busy_family_and_interrupted_is_not():
     assert errors.write_refused_for(409, _body("dataset_interrupted"), "u").error_id is None
     busy = errors.write_refused_for(409, _body("dataset_project_busy", waited_seconds=1800), "u")
     assert busy.waited_seconds == 1800
+
+
+def test_a_429_on_the_records_door_is_write_throttled_with_its_wait():
+    # The dataset door's per-key rate (DRF Throttled) and its cap on queued /
+    # running jobs both answer 429 throttled + Retry-After (server C2).
+    body = {"reason_code": "throttled", "detail": "2 dataset jobs", "remedy": "Poll them.",
+            "offending": {"in_flight": 2, "limit": 2}}
+    exc = errors.write_refused_for(429, body, "u", headers={"Retry-After": "30"})
+    assert type(exc) is geodb.WriteThrottled
+    assert isinstance(exc, geodb.Throttled) and isinstance(exc, geodb.WriteRefused)
+    assert exc.retry_after == 30 and exc.status_code == 429
+    assert (exc.in_flight, exc.limit) == (2, 2)
+    rate = errors.write_refused_for(429, {"reason_code": "throttled", "detail": "rate"}, "u")
+    assert type(rate) is geodb.WriteThrottled and rate.retry_after is None
+    assert rate.in_flight is None

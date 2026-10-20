@@ -212,6 +212,25 @@ class RowsRefused(WriteRefused):
         self.rows = rows
 
 
+class WriteThrottled(WriteRefused, Throttled):
+    """429 ``throttled`` on the records endpoint: the key's request rate, or
+    (the dataset door) the key already holds as many queued / running dataset
+    jobs as it may (``in_flight`` of ``limit``). Nothing was done by it.
+    ``retry_after`` is the server's Retry-After (seconds). The request may be
+    sent again — the SAME body; a refusal is never stored under its
+    Idempotency-Key, so the same key runs for real. The dataset helpers do so
+    a bounded number of times (``geodb.datasets``); ``Client.write`` raises.
+    Both a :class:`WriteRefused` and a :class:`Throttled`."""
+
+    @property
+    def in_flight(self):
+        return (self.offending or {}).get("in_flight")
+
+    @property
+    def limit(self):
+        return (self.offending or {}).get("limit")
+
+
 # ── The dataset dry run (protocol import efficiency W6; client W7b) ──────────
 class DatasetRefused(WriteRefused):
     """A dataset request (``validate_dataset``, ``DatasetPlan.write``,
@@ -358,11 +377,15 @@ DATASET_REASON_CODES = {
 
 def write_refused_for(status_code, body, url=None, *, headers=None):
     """THE exception for a refused records request: the dataset class its
-    ``reason_code`` names, else :class:`WriteRefused`; a :class:`DatasetBusy`
-    carries the server's ``Retry-After``."""
+    ``reason_code`` names, :class:`WriteThrottled` for a 429, else
+    :class:`WriteRefused`; a :class:`DatasetBusy` and a
+    :class:`WriteThrottled` carry the server's ``Retry-After``."""
     code = body.get("reason_code") if isinstance(body, dict) else None
-    exc = DATASET_REASON_CODES.get(code, WriteRefused)(status_code, body, url)
-    if isinstance(exc, DatasetBusy):
+    cls = DATASET_REASON_CODES.get(code)
+    if cls is None:
+        cls = WriteThrottled if status_code == 429 or code == "throttled" else WriteRefused
+    exc = cls(status_code, body, url)
+    if isinstance(exc, (DatasetBusy, WriteThrottled)):
         exc.retry_after = _retry_after_header(headers)
     return exc
 

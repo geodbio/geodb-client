@@ -404,6 +404,11 @@ The dataset reason codes, each its own exception (all subclasses of `geodb.Write
 A background dataset job that fails with no reason code, stalls or runs past the hard cap raises
 `geodb.DatasetJobFailed`.
 
+A 429 `throttled` on a dataset request (the key's dataset rate, or the dataset jobs it already has
+queued or running) raises `geodb.WriteThrottled` (also a `geodb.Throttled`; `.retry_after`,
+`.in_flight` / `.limit`). The dataset helpers wait its `Retry-After` and send the same request
+again (bounded, warns), but never sleep past 10 minutes on their own: a longer wait is raised.
+
 ## Development
 
 ```bash
