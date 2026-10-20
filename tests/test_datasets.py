@@ -431,6 +431,65 @@ def test_a_failed_job_without_one_raises_dataset_job_failed(clock):
         gx.validate_dataset(12, {"Method": METHODS})
 
 
+# Server C2 (dataset_lane.poll): EVERY finished status polls 200 — done with
+# "result" (a stopped write's stop answer included), failed / cancelled with the
+# refusal's reason_code / detail / remedy / offending TOP-LEVEL. (The 500
+# cases above stay: an older server's shape is still read.)
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_a_200_failed_poll_raises_the_typed_refusal_it_names(clock, status):
+    ended = Resp(200, {"id": DS, "kind": "rehearsal", "status": status,
+                       "reason_code": "dataset_file_changed", "detail": "a member changed",
+                       "remedy": "Upload it again.", "offending": {"document": 812},
+                       "progress": {"member": 1, "members": 1, "model": "Method",
+                                    "rows_done": 0, "rows_total": 4}})
+    gx, s = _client(uploaded(812), queued(), ended)
+    with pytest.raises(geodb.DatasetFileChanged) as caught:
+        gx.validate_dataset(12, {"Method": METHODS})
+    assert caught.value.remedy == "Upload it again."
+    assert caught.value.offending == {"document": 812}
+    assert len(_records_kw(s)) == 1                                # never re-sent
+
+
+def test_a_200_failed_poll_of_a_non_dataset_code_is_a_write_refused(clock):
+    ended = failed_at_poll("write_access_insufficient")
+    gx, _s = _client(uploaded(812), queued(), ended)
+    with pytest.raises(geodb.WriteRefused) as caught:
+        gx.validate_dataset(12, {"Method": METHODS})
+    assert caught.value.reason_code == "write_access_insufficient"
+
+
+def test_a_200_failed_poll_without_a_reason_code_is_dataset_job_failed(clock):
+    ended = Resp(200, {"id": DS, "kind": "rehearsal", "status": "failed",
+                       "detail": "the job was lost"})
+    gx, _s = _client(uploaded(812), queued(), ended)
+    with pytest.raises(geodb.DatasetJobFailed, match="the job was lost"):
+        gx.validate_dataset(12, {"Method": METHODS})
+
+
+def test_a_rail_write_that_stopped_polls_done_and_is_the_stop_answer(clock):
+    plan, s = _plan([queued(kind="write"), finished(write_stopped(), kind="write")])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        done = plan.write()
+    assert isinstance(done, datasets.DatasetWrite)
+    assert done.status == "stopped" and done.stopped["reason_code"] == "dataset_plan_changed"
+    assert [m["model"] for m in done.landed] == ["Method"]
+    assert done.body["rehearse_rest"]["dataset"]["continues"] == "w-1"
+    assert len(_records_kw(s)) == 2                                # the rehearsal + one write
+
+
+def test_a_rail_write_that_stopped_on_busy_rows_is_sent_again(clock):
+    plan, s = _plan([queued(kind="write"), finished(write_stopped("dataset_rows_busy"),
+                                                    kind="write"),
+                     Resp(200, write_done())])
+    with pytest.warns(RuntimeWarning, match="dataset_rows_busy"):
+        done = plan.write()
+    assert done.status == "done"
+    first, second = _records_kw(s)[-2:]
+    assert first["json"] == second["json"] == WRITE_BODY
+    assert first["headers"]["Idempotency-Key"] != second["headers"]["Idempotency-Key"]
+
+
 def test_a_stalled_job_runs_out_the_stall_timeout(clock):
     gx, _s = _client(uploaded(812), queued(), *[polling(rows_done=5) for _ in range(20)])
     with pytest.raises(geodb.DatasetJobFailed, match="no progress"):

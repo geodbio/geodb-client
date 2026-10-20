@@ -576,9 +576,12 @@ class Client(UploadsMixin, DatasetsMixin):
         return self._handle(resp, raw_status=raw_status)
 
     def _poll(self, path):
-        """``(body, headers)`` of a job status poll, whose status code is the
-        signal: 202 in flight, 200 done, 500 with ``state: error`` failed. Any
-        other refusal raises its typed exception (a 429 ``throttled`` too)."""
+        """``(body, headers)`` of a job status poll: 202 in flight; 200 once
+        it ended — an export ``done``, a dataset job ``done`` OR ``failed`` /
+        ``cancelled`` (its refusal's ``reason_code`` top-level: the BODY says
+        which, ``DatasetJob.wait`` settles it); 500 with ``state: error`` an
+        export that failed (a dataset job on an older server too). Any other
+        refusal raises its typed exception (a 429 ``throttled`` too)."""
         resp = self._session.get(self._url(path), headers=self._headers(),
                                  timeout=self.timeout)
         self._check_protocol(resp)
