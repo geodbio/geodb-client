@@ -502,6 +502,21 @@ def test_rehearse_rest_sends_the_stop_answers_request_verbatim(clock):
     assert s.uploads() and len(s.uploads()) == 1             # no file is uploaded again
 
 
+def test_rehearse_rest_sends_a_qc_read_by_reference_verbatim(clock):
+    # Server C2: a stop answer names the approved QC read BY REFERENCE
+    # ({"same_as": "<rehearsal id>"}, resolved server-side for THIS key) so the
+    # answer stays <= 32 KB. The client sends it back exactly as given.
+    stopped = write_stopped()
+    stopped["rehearse_rest"]["qc_mapping"] = {"same_as": DS}
+    stopped["rehearse_rest"]["acknowledge"] = ["replace_values"]
+    rest = copy.deepcopy(stopped["rehearse_rest"])
+    plan, s = _plan([Resp(200, stopped), Resp(200, answer(continues="w-1"))])
+    plan.write().rehearse_rest()
+    sent = s.records_posts()[-1]
+    assert sent == rest
+    assert sent["qc_mapping"] == {"same_as": DS}
+
+
 def test_rehearse_rest_needs_a_stop(clock):
     plan, _s = _plan([Resp(200, write_done())])
     with pytest.raises(ValueError):
