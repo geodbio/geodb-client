@@ -22,6 +22,7 @@ import copy
 import csv
 import io
 import json
+import re
 import warnings
 
 import pandas as pd
@@ -229,7 +230,10 @@ def test_the_rehearsal_carries_acknowledge_qc_mapping_and_per_member_options(clo
         "Method": {"document": 777},                          # an upload made earlier
     }, intent="upsert", acknowledge=["replace_values"], qc_mapping=qc)
     ups = s.uploads()
-    assert ups[0]["files"]["document"] == ("certs.csv", path.read_bytes())
+    name, data = ups[0]["files"]["document"]
+    assert data == path.read_bytes()
+    # 0.3.6: a path member is named like a DataFrame's (never its basename).
+    assert re.fullmatch(r"certificate_\d{8}T\d{6}Z\.csv", name), name
     (body,) = s.records_posts()
     assert body["intent"] == "upsert"
     assert body["acknowledge"] == ["replace_values"]
@@ -284,7 +288,7 @@ def test_summary_is_counts_codes_and_server_words_never_cell_text(clock):
     gx, _s = _client(uploaded(812), uploaded(813), Resp(200, answer()))
     text = gx.validate_dataset(12, {"Method": METHODS, "Assay": ASSAYS}).summary()
     assert "NOTHING HAS BEEN WRITTEN" in text
-    assert "Method → Assay" in text
+    assert "Method -> Assay" in text
     assert "record_exists 1" in text
     assert "method_detection_limit_missing 1" in text
     assert "Tell the user what this dataset will do" in text          # before_writing.say
@@ -1207,3 +1211,44 @@ def test_project_busy_and_rows_busy_keep_their_own_budgets(clock):
         plan = gx.validate_dataset(12, {"Method": METHODS}, busy_retries=1,
                                    project_busy_retries=1)
     assert plan.plan_token == TOKEN and len(_records_kw(s)) == 3
+
+
+# ── 0.3.6: the connector field report's two client defects ──────────────────
+def test_a_path_member_rehearsed_twice_is_never_uploaded_under_its_basename(clock, tmp_path):
+    """A second rehearsal of the same files was refused "A document with
+    file_name 'Laboratory.csv' already exists": a path member went up under
+    its own basename, a DataFrame under a stamped name. Both are stamped."""
+    path = tmp_path / "Laboratory.csv"
+    path.write_bytes(b"name\r\nLab A\r\n")
+    gx, s = _client(uploaded(900), Resp(200, answer()), uploaded(901), Resp(200, answer()))
+    gx.validate_dataset(12, {"Laboratory": str(path)})
+    gx.validate_dataset(12, {"Laboratory": {"path": path}})
+    names = [up["files"]["document"][0] for up in s.uploads()]
+    assert len(names) == 2
+    for name in names:
+        assert name != "Laboratory.csv"
+        assert re.fullmatch(r"laboratory_\d{8}T\d{6}Z\.csv", name), name
+
+
+def test_the_summaries_print_on_a_cp1252_console(clock):
+    """``print(plan.summary())`` raised UnicodeEncodeError on a Windows
+    (cp1252) console: the load order joined with an arrow. Every summary is
+    console-safe, the server's words included; what cp1252 has is kept."""
+    body = answer()
+    body["before_writing"]["say"] = ("Tell the user \u2192 then wait \u2014 the "
+                                     "dry run \u2248 the write \u26a0 caf\u00e9")
+    gx, _s = _client(uploaded(812), uploaded(813), Resp(200, body))
+    text = gx.validate_dataset(12, {"Method": METHODS, "Assay": ASSAYS}).summary()
+    text.encode("cp1252")                       # raises before 0.3.6
+    assert "Method -> Assay" in text
+    assert "Tell the user -> then wait \u2014 the dry run ~ the write ! caf\u00e9" in text
+
+
+def test_the_write_summary_prints_on_a_cp1252_console():
+    write = datasets.DatasetWrite(None, {
+        "status": "done", "write_id": "w-1", "say": "Written \u2192 tell the user.",
+        "members": [{"model": "Assay", "document": 1, "status": "landed",
+                     "summary": {"created": 2}}]})
+    text = write.summary()
+    text.encode("cp1252")                       # raises before 0.3.6
+    assert "Written -> tell the user." in text

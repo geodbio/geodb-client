@@ -183,16 +183,51 @@ def _member_specs(members):
 
 
 def _member_file(model, spec):
-    """``(file name, bytes)`` of one member to upload."""
+    """``(file name, bytes)`` of one member to upload. EVERY member is named
+    ``<model>_<stamp>.csv``, a file read from ``path`` too: under its own
+    basename a second rehearsal of the same files was refused ("A document
+    with file_name 'Laboratory.csv' already exists"), while a DataFrame's
+    stamped name never collided (0.3.6)."""
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    name = f"{model.lower()}_{stamp}.csv"
     if spec.get("path") is not None:
         path = os.fspath(spec["path"])
         with open(path, "rb") as fh:
-            return os.path.basename(path), fh.read()
+            return name, fh.read()
     data = spec["data"]
     if isinstance(data, (bytes, bytearray)):
-        return f"{model.lower()}_{stamp}.csv", bytes(data)
-    return f"{model.lower()}_{stamp}.csv", member_csv(data)
+        return name, bytes(data)
+    return name, member_csv(data)
+
+
+#: Characters the summaries' OWN words use that a legacy Windows console
+#: (cp1252) cannot print, and what they read as there (0.3.6).
+_CONSOLE_FALLBACKS = {"\u2192": "->", "\u2190": "<-", "\u2248": "~", "\u2264": "<=",
+                      "\u2265": ">=", "\u26a0": "!", "\u2713": "ok"}
+
+
+def _console_safe(text):
+    """``text`` printable on a cp1252 console (a Windows terminal's default):
+    known symbols to their ASCII readings, any other character cp1252 lacks
+    to its closest ASCII (NFKD) or ``?``. Characters cp1252 HAS (an em dash,
+    an ellipsis, a degree sign) are kept, so a UTF-8 console reads the same
+    words. ``print(plan.summary())`` raised UnicodeEncodeError on the arrow
+    before 0.3.6."""
+    import unicodedata
+    out = []
+    for ch in text:
+        try:
+            ch.encode("cp1252")
+            out.append(ch)
+            continue
+        except UnicodeEncodeError:
+            pass
+        if ch in _CONSOLE_FALLBACKS:
+            out.append(_CONSOLE_FALLBACKS[ch])
+            continue
+        plain = unicodedata.normalize("NFKD", ch).encode("ascii", "ignore").decode("ascii")
+        out.append(plain or "?")
+    return "".join(out)
 
 
 def _uploaded_id(result):
@@ -531,7 +566,7 @@ class DatasetPlan(_Answer):
                  f"{self.project}): {b.get('rows', 0)} rows in {len(self.members)} member "
                  f"file(s). NOTHING HAS BEEN WRITTEN."]
         if self.order:
-            lines.append("Load order: " + " → ".join(self.order))
+            lines.append("Load order: " + " -> ".join(self.order))
         for m in self.members:
             lines.append(f"- {m.get('model')} (document {m.get('document')}, "
                          f"{m.get('rows', 0)} rows): {_counts(m.get('summary'))}")
@@ -557,7 +592,7 @@ class DatasetPlan(_Answer):
                          f"expires {self.expires_at}.")
         else:
             lines.append("This answer offers no write.")
-        return "\n".join(lines)
+        return _console_safe("\n".join(lines))
 
     def __repr__(self):
         return (f"<DatasetPlan {self.dataset_id} {self.intent} members="
@@ -694,7 +729,7 @@ class DatasetWrite(_Answer):
             lines.append(self.say)
         if self.write_id:
             lines.append("Undo everything it landed: .undo() (one request).")
-        return "\n".join(lines)
+        return _console_safe("\n".join(lines))
 
     def __repr__(self):
         return (f"<DatasetWrite {self.status} write_id={self.write_id} landed="

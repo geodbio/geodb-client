@@ -431,7 +431,10 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.5 (protocol 0.3): 0.3.5 adds OS-certificate-store TLS,
+Apache-2.0. Version 0.3.6 (protocol 0.3): 0.3.6 names a dataset member read from a
+file like a DataFrame's (`<model>_<stamp>.csv`, so a second rehearsal of the same files is
+never refused for a repeated file name) and prints every summary on a legacy Windows
+(cp1252) console. 0.3.5 added OS-certificate-store TLS,
 exports that follow `Retry-After` with progress, a stall timeout and one loud restart,
 `record_counts`, several `name=` / `bhid=` values, `include_trashed`, `upload_document(attach_to=)`,
 and the dataset dry run (`validate_dataset` → `DatasetPlan.write()` → one Undo).
