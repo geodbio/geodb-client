@@ -159,8 +159,9 @@ def test_any_other_403_on_the_records_door_is_a_forbidden_write():
     assert exc.reason_code == "write_access_insufficient" and exc.status_code == 403
 
 
-def test_the_records_registry_names_the_two_codes():
+def test_the_records_registry_names_its_codes():
     assert errors.RECORDS_REASON_CODES == {
         "writes_switched_off": geodb.WritesSwitchedOff,
-        "undo_needs_company_reach": geodb.UndoNeedsCompanyReach}
+        "undo_needs_company_reach": geodb.UndoNeedsCompanyReach,
+        "batch_too_large": geodb.BatchTooLarge}      # 0.3.7
     assert not set(errors.RECORDS_REASON_CODES) & set(errors.DATASET_REASON_CODES)

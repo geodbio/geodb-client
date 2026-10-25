@@ -34,12 +34,12 @@ from .errors import (
     DatasetNotGrouped, DatasetPlanInvalid, DatasetPlanExpired, DatasetPlanChanged,
     DatasetFileChanged, DatasetAlreadyWritten, DatasetBusy, DatasetInProgress,
     DatasetRowsBusy, DatasetWriteFailed, DatasetProjectBusy, DatasetInterrupted,
-    DatasetJobFailed, WriteForbidden, WritesSwitchedOff, UndoNeedsCompanyReach,
+    DatasetJobFailed, WriteForbidden, WritesSwitchedOff, UndoNeedsCompanyReach, BatchTooLarge,
 )
 from .uploads import StorageUnreachable
 from .writes import WriteResult
 
-__version__ = "0.3.6"
+__version__ = "0.3.7"
 
 __all__ = [
     "Client", "PROTOCOL_VERSION", "ProtocolVersionMismatch",
@@ -52,5 +52,6 @@ __all__ = [
     "DatasetFileChanged", "DatasetAlreadyWritten", "DatasetBusy", "DatasetInProgress",
     "DatasetRowsBusy", "DatasetWriteFailed", "DatasetProjectBusy", "DatasetInterrupted",
     "DatasetJobFailed", "WriteForbidden", "WritesSwitchedOff", "UndoNeedsCompanyReach",
+    "BatchTooLarge",
     "__version__",
 ]

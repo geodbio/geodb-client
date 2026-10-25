@@ -41,6 +41,8 @@ import os
 import time
 import uuid
 
+from .writes import idempotency_header
+
 __all__ = ["StorageUnreachable", "UploadsMixin"]
 
 
@@ -110,7 +112,7 @@ class UploadsMixin:
         from .writes import WriteResult
         from .errors import WriteRefused
         headers = self._headers()          # requests sets the multipart Content-Type
-        headers["Idempotency-Key"] = str(idempotency_key or f"upload-{uuid.uuid4()}")
+        headers["Idempotency-Key"] = idempotency_header(idempotency_key or f"upload-{uuid.uuid4()}")
         waits = list(_UPLOAD_RETRY_WAITS)
         while True:
             try:

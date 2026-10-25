@@ -260,6 +260,20 @@ for w in gx.writes(undone=False): ...          # what this key wrote, newest fir
 
 `logging_set=` is the body's `"set"`, for every set-aware family (sample sets
 too). `undo()` and `restore()` take `idempotency_key=` like `write()`.
+
+**Batch limit and idempotency keys (0.3.7).** A request carries at most the
+record type's `batch_limit` rows (`describe(model)["batch_limit"]`, 1,000 for
+the records door). `gx.validate()` over the limit is split into batches and
+answered as ONE result (row indexes are positions in the rows you passed;
+`result["batches"]` says it was split); a long-form type (`describe(model)
+["long_form"]`, e.g. `Assay`) is never split, because a cut could split one
+record's values. `gx.write()` over the limit raises `geodb.BatchTooLarge`
+(`.limit`, `.rows`) **before anything is sent**: send batches of at most the
+limit (each its own `write_id` and Undo), or the dataset door for one Undo.
+Any string works as an `idempotency_key`: one that is not printable ASCII (an
+en dash copied from a name) or is longer than 255 characters is sent as
+`sha256:<hex>` of its UTF-8 bytes, the same header every time, so a retry still
+replays.
 `result.raise_for_refusals()` raises `geodb.RowsRefused` (status 200, `.rows`)
 when rows were refused. `make_default_set` and `qaqc_verdict` have no methods
 on purpose — each is a person's own act on their explicit request (a vendor key
@@ -405,6 +419,7 @@ each its own exception (all subclasses of `geodb.WriteRefused`):
 | `dataset_interrupted` | `geodb.DatasetInterrupted` | a background dataset job (a rehearsal, write or undo) ended without finishing — the server running it stopped or hit an unexpected error | sends the same request again once (`restart_interrupted`, warns), then raises |
 | `writes_switched_off` | `geodb.WritesSwitchedOff` | writing through AI connections was switched off on the server (503, an operator's switch, not something the request did) after a background dataset job was accepted, so it did not run (a write already running stopped before its next member; the members before it stay landed, under its one Undo) | sends again at most 1×, only after a `Retry-After` the server named (warns); else raises at once. In a write's answer it is `DatasetWrite.stopped` |
 | `undo_needs_company_reach` | `geodb.UndoNeedsCompanyReach` | the write being undone created or changed a record every project of the company shares (a laboratory, method or standard), and this key no longer reaches every project of that company (`offending.company_shared`) | raises; never sent again |
+| `batch_too_large` | `geodb.BatchTooLarge` | more rows than the record type's `batch_limit` (`describe(model)["batch_limit"]`) in one request | `write()` raises it before sending when `describe` gives the limit; `validate()` splits instead (not a long-form type); a dataset is never refused it |
 <!-- END:datasets -->
 
 A background dataset job that fails with no reason code, stalls or runs past the hard cap raises
@@ -431,7 +446,10 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.6 (protocol 0.3): 0.3.6 names a dataset member read from a
+Apache-2.0. Version 0.3.7 (protocol 0.3): 0.3.7 sends any idempotency key safely (a
+non-ASCII or over-long key travels as its sha256, never a `UnicodeEncodeError`), splits an
+over-limit `validate()` into batches answered as one result, and raises `BatchTooLarge`
+before sending an over-limit `write()`. 0.3.6 names a dataset member read from a
 file like a DataFrame's (`<model>_<stamp>.csv`, so a second rehearsal of the same files is
 never refused for a repeated file name) and prints every summary on a legacy Windows
 (cp1252) console. 0.3.5 added OS-certificate-store TLS,

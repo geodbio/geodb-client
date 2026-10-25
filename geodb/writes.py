@@ -21,12 +21,118 @@ and ``remedy`` while the rest of the batch lands — so a write returns a
 the whole request raises :class:`geodb.WriteRefused`.
 """
 
+import hashlib
 import json
 
-__all__ = ["WriteResult", "rows_from"]
+__all__ = ["WriteResult", "rows_from", "idempotency_header"]
 
 #: The row statuses that mean the server CHANGED something.
 LANDED = ("created", "updated", "accepted", "retracted", "restored", "undone")
+
+#: The server's own limit on an Idempotency-Key (``protocol/writes/
+#: idempotency.py`` MAX_KEY_LENGTH); a longer key is refused there.
+MAX_IDEMPOTENCY_KEY_LENGTH = 255
+
+
+def idempotency_header(key):
+    """THE ``Idempotency-Key`` header value for ``key`` (every write and upload
+    sends it through here).
+
+    A key of printable ASCII within the server's length limit is sent exactly
+    as given (byte-identical to earlier releases, so a retry still replays the
+    first answer). Any other key (an en dash or other non-ASCII character, a
+    control character, longer than 255) cannot travel in an HTTP header or
+    would be refused, so it is sent as ``"sha256:"`` + the hex digest of its
+    UTF-8 bytes: deterministic, so the same key always sends the same header
+    and a retry with it still dedupes."""
+    value = str(key)
+    if len(value) <= MAX_IDEMPOTENCY_KEY_LENGTH and all(32 <= ord(ch) < 127 for ch in value):
+        return value
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sum_counts(dicts):
+    out = {}
+    for d in dicts:
+        for k, v in (d or {}).items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out[k] = out.get(k, 0) + v
+            else:
+                out.setdefault(k, v)
+    return out
+
+
+def _unique(items):
+    seen, out = set(), []
+    for item in items:
+        key = json.dumps(item, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def merge_batch_answers(answers, sizes, limit):
+    """ONE dry-run answer from the answers to consecutive batches of one
+    request's rows (``Client.validate`` over ``batch_limit``): rows keep the
+    index of their position in the rows passed (each batch's indexes offset by
+    the rows before it), ``summary`` and ``cascade`` counts are summed, warnings
+    and list entries joined once each, ``ignored_fields`` united; the first
+    batch's answer gives every other key. ``batches`` says it was split."""
+    merged = dict(answers[0])
+    rows, offset, offsets = [], 0, []
+    for answer, size in zip(answers, sizes):
+        offsets.append(offset)
+        for row in answer.get("rows") or []:
+            row = dict(row)
+            if isinstance(row.get("index"), int):
+                row["index"] += offset
+            rows.append(row)
+        offset += size
+    merged["rows"] = rows
+    merged["summary"] = _sum_counts(a.get("summary") for a in answers)
+    if any(a.get("cascade") for a in answers):
+        merged["cascade"] = _sum_counts(a.get("cascade") for a in answers)
+    warnings = []
+    for answer, base in zip(answers, offsets):
+        for warning in answer.get("warnings") or []:
+            if isinstance(warning, dict) and isinstance(warning.get("rows"), list):
+                warning = dict(warning, rows=[r + base if isinstance(r, int) else r
+                                              for r in warning["rows"]])
+            warnings.append(warning)
+    if warnings:
+        merged["warnings"] = _unique(warnings)
+    entries = [a.get("catalog_entries") for a in answers if a.get("catalog_entries")]
+    if entries and all(isinstance(e, list) for e in entries):
+        merged["catalog_entries"] = _unique([x for e in entries for x in e])
+    ignored = sorted({f for a in answers for f in (a.get("ignored_fields") or [])})
+    if ignored:
+        merged["ignored_fields"] = ignored
+    sets = {}
+    for answer in answers:
+        sets.update(answer.get("sets") or {})
+    if sets:
+        merged["sets"] = sets
+    asks = [a.get("before_writing") for a in answers if a.get("before_writing")]
+    if asks:
+        ask = dict(asks[0])
+        counted = [a.get("warnings") for a in asks if isinstance(a.get("warnings"), int)]
+        if counted:
+            ask["warnings"] = sum(counted)
+        remedies = {}
+        for a in asks:
+            remedies.update(a.get("remedies") or {})
+        if remedies:
+            ask["remedies"] = remedies
+        merged["before_writing"] = ask
+    merged["batches"] = {
+        "count": len(answers), "limit": limit,
+        "note": (f"validated in {len(answers)} requests of at most {limit} rows (the "
+                 f"server's batch_limit); row indexes are positions in the rows passed. "
+                 f"A write of these rows must also go in batches of at most {limit}, each "
+                 f"its own write_id and Undo, or through the dataset door for one Undo."),
+    }
+    return merged
 
 
 def _plain(value):

@@ -56,6 +56,10 @@ def render_datasets():
                     "`DatasetWrite.stopped`")
         elif issubclass(cls, WriteForbidden):
             does = "raises; never sent again"
+        elif code == "batch_too_large":
+            does = ("`write()` raises it before sending when `describe` gives the limit; "
+                    "`validate()` splits instead (not a long-form type); a dataset is never "
+                    "refused it")
         elif code == "dataset_project_busy":
             does = (f"sends again {PROJECT_BUSY_RETRIES}× by default (`project_busy_retries`: "
                     "each server wait can be 30 min), warns, then raises")

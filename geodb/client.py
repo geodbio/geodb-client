@@ -19,12 +19,12 @@ too (``auth_scheme="Token"``) for first-party use.
 import time
 
 from ._tls import new_session
-from .errors import (AuthError, NotFoundError, APIError, ExportConcurrency, ExportError,
-                     ExportInterrupted, ProtocolVersionMismatch, Throttled, WriteRefused,
-                     error_for, write_refused_for)
+from .errors import (AuthError, BatchTooLarge, GeodbError, NotFoundError, APIError,
+                     ExportConcurrency, ExportError, ExportInterrupted, ProtocolVersionMismatch,
+                     Throttled, WriteRefused, error_for, write_refused_for)
 from .datasets import DatasetsMixin
 from .uploads import UploadsMixin
-from .writes import WriteResult, rows_from
+from .writes import WriteResult, idempotency_header, merge_batch_answers, rows_from
 
 __all__ = ["Client", "PROTOCOL_VERSION", "client_requirement"]
 
@@ -48,6 +48,12 @@ def client_requirement(version):
     """The geodb-client releases that speak protocol ``version``."""
     major, minor = _minor(version)
     return f"geodb-client>={major}.{minor},<{major}.{minor + 1}"
+
+#: The records door's batch limit for every record type (``describe(model)
+#: ["batch_limit"]``). A write over it asks describe for the exact limit
+#: first; the notes and report faces have smaller limits, which the server's
+#: ``batch_too_large`` refusal reports (raised as :class:`BatchTooLarge`).
+DEFAULT_BATCH_LIMIT = 1000
 
 _DEFAULT_TIMEOUT = 60
 _DEFAULT_BASE = "https://api.geodb.io"
@@ -735,7 +741,7 @@ class Client(UploadsMixin, DatasetsMixin):
         from it (``geodb.datasets``)."""
         headers = self._headers()
         if idempotency_key:
-            headers["Idempotency-Key"] = str(idempotency_key)
+            headers["Idempotency-Key"] = idempotency_header(idempotency_key)
         resp = self._session.post(self._url(path), json=body, headers=headers,
                                   timeout=self.timeout)
         self._check_protocol(resp)
@@ -786,7 +792,12 @@ class Client(UploadsMixin, DatasetsMixin):
             project: the project the rows belong to (geoDB keeps no current
                 project; name it).
             idempotency_key: send one (e.g. a uuid you keep) to make a retry of
-                the same request safe: it replays the first answer.
+                the same request safe: it replays the first answer. Any string
+                works: one that is not printable ASCII (an en dash copied from
+                a name) is sent as its sha256, the same header every time.
+                More rows than the record type's ``batch_limit`` raise
+                :class:`geodb.BatchTooLarge` before anything is sent (a dry
+                run is split instead: see :meth:`validate`).
             dry_run: True validates — the same per-row outcomes, nothing written.
             acknowledge: consents the user gave, e.g.
                 ``["create_catalog_entries"]``, ``["replace_values"]``,
@@ -876,7 +887,8 @@ class Client(UploadsMixin, DatasetsMixin):
         ``"QCSample"``) also goes through this call: dry-run it and ask first,
         as for any change to existing records; it needs no confirm value.
         """
-        body = {"model": model, "intent": intent, "records": rows_from(rows),
+        records = rows_from(rows)
+        body = {"model": model, "intent": intent, "records": records,
                 "dry_run": bool(dry_run)}
         if logging_set is not None:
             body["set"] = logging_set
@@ -888,10 +900,56 @@ class Client(UploadsMixin, DatasetsMixin):
             body["confirm"] = confirm
         if layer is not None:
             body["layer"] = layer
+        known = self._batch_limit(model, project) if len(records) > DEFAULT_BATCH_LIMIT else None
+        if known is not None and len(records) > known[0]:
+            limit, long_form = known
+            if dry_run and not long_form:
+                return self._validate_in_batches(body, limit, idempotency_key)
+            raise BatchTooLarge.before_sending(model, len(records), limit, long_form=long_form)
         return self._records(body, idempotency_key)
 
+    def _batch_limit(self, model, project):
+        """``(batch_limit, long_form)`` from ``describe(model)``, cached per
+        (model, project) for this client's life; None when describe does not
+        answer one (the request is then sent, and a server ``batch_too_large``
+        refusal raises :class:`BatchTooLarge` all the same)."""
+        cache = self.__dict__.setdefault("_batch_limits", {})
+        key = (model, project)
+        if key not in cache:
+            known = None
+            try:
+                contract = self.describe(model, project=project)
+            except (GeodbError, OSError):
+                contract = None
+            limit = contract.get("batch_limit") if isinstance(contract, dict) else None
+            if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+                known = (limit, bool(contract.get("long_form")))
+            cache[key] = known
+        return cache[key]
+
+    def _validate_in_batches(self, body, limit, idempotency_key=None):
+        """A dry run over more rows than ``limit``: one request per ``limit``
+        rows, answered as ONE :class:`WriteResult` (``merge_batch_answers``).
+        Each batch carries its own Idempotency-Key (``<key>:batch-<n>``): one
+        key on several different bodies would be refused by the server."""
+        records = body["records"]
+        answers, sizes = [], []
+        for n, start in enumerate(range(0, len(records), limit), start=1):
+            chunk = dict(body, records=records[start:start + limit])
+            key = f"{idempotency_key}:batch-{n}" if idempotency_key else None
+            answers.append(self._records(chunk, key).body)
+            sizes.append(len(chunk["records"]))
+        return WriteResult(self, merge_batch_answers(answers, sizes, limit))
+
     def validate(self, model, rows, intent="create", **kwargs):
-        """``write(..., dry_run=True)``: every row's outcome, nothing written."""
+        """``write(..., dry_run=True)``: every row's outcome, nothing written.
+
+        More rows than the record type's ``batch_limit`` (``describe``) are
+        validated in batches of at most the limit and answered as ONE result
+        (row indexes are positions in ``rows``; ``result["batches"]`` says it
+        was split). A long-form record type (``describe(model)["long_form"]``,
+        e.g. ``Assay``) is never split — a cut could split one record's values
+        — and raises :class:`geodb.BatchTooLarge` instead, before sending."""
         kwargs["dry_run"] = True
         return self.write(model, rows, intent, **kwargs)
 

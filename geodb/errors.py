@@ -390,11 +390,48 @@ class WritesSwitchedOff(WriteRefused):
             "write lands only what has not landed).")
 
 
+class BatchTooLarge(WriteRefused):
+    """``batch_too_large``: more rows than the record type's ``batch_limit``
+    (``describe(model)["batch_limit"]``) in one request. ``Client.write``
+    raises it BEFORE sending when it knows the limit (nothing was sent), or
+    maps the server's refusal to it (nothing was done). ``limit`` is the most
+    rows one request may carry, ``rows`` how many were sent.
+    ``Client.validate`` splits an over-limit dry run itself (except for a
+    long-form record type, whose rows a cut could split across requests)."""
+
+    hint = ("Split the rows into batches of at most the limit and send each as its own "
+            "write: each batch gets its own write_id and its own Undo. For ONE Undo over "
+            "the whole load, send it through the dataset door (validate_dataset, then "
+            "plan.write()).")
+
+    @property
+    def limit(self):
+        return (self.offending or {}).get("limit")
+
+    @property
+    def rows(self):
+        return (self.offending or {}).get("records")
+
+    @classmethod
+    def before_sending(cls, model, rows, limit, *, long_form=False):
+        """The refusal raised client-side, with the server's envelope shape."""
+        detail = f"{rows} {model} records in one request; the limit is {limit}."
+        if long_form:
+            detail += (" A long-form record type is never split by the client: a cut "
+                       "could split one record's values across requests, so keep each "
+                       "record's rows in one batch.")
+        return cls(400, {"reason_code": "batch_too_large", "detail": detail,
+                         "remedy": f"Send at most {limit} records per request.",
+                         "offending": {"records": rows, "limit": limit},
+                         "raised_by": "client"})
+
+
 #: The records-door reason codes that are not dataset codes but have their own
 #: exception (server batch-C review §6.18; the README's table reads it too).
 RECORDS_REASON_CODES = {
     "writes_switched_off": WritesSwitchedOff,
     "undo_needs_company_reach": UndoNeedsCompanyReach,
+    "batch_too_large": BatchTooLarge,
 }
 
 
