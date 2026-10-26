@@ -413,13 +413,25 @@ class BatchTooLarge(WriteRefused):
         return (self.offending or {}).get("records")
 
     @classmethod
-    def before_sending(cls, model, rows, limit, *, long_form=False):
-        """The refusal raised client-side, with the server's envelope shape."""
+    def before_sending(cls, model, rows, limit, *, long_form=False, consent=None, group=None):
+        """The refusal raised client-side, with the server's envelope shape.
+        ``consent``: the intent of a dry run never split (its count is what
+        the user agrees to); ``group``: ``(field, value, size)`` of rows that
+        must stay in one request but are more than the limit."""
         detail = f"{rows} {model} records in one request; the limit is {limit}."
         if long_form:
             detail += (" A long-form record type is never split by the client: a cut "
                        "could split one record's values across requests, so keep each "
                        "record's rows in one batch.")
+        if consent:
+            detail += (f" A {consent} dry run is never split by the client: what it "
+                       f"reports is what the user agrees to, so it must come from one "
+                       f"request. Send fewer records per {consent}.")
+        if group:
+            field, value, size = group
+            detail += (f" The {size} rows with {field} {value!r} must be checked in one "
+                       f"request (checks across rows, such as overlaps, run per request), "
+                       f"and they are more than the limit.")
         return cls(400, {"reason_code": "batch_too_large", "detail": detail,
                          "remedy": f"Send at most {limit} records per request.",
                          "offending": {"records": rows, "limit": limit},

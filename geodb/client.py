@@ -24,7 +24,8 @@ from .errors import (AuthError, BatchTooLarge, GeodbError, NotFoundError, APIErr
                      Throttled, WriteRefused, error_for, write_refused_for)
 from .datasets import DatasetsMixin
 from .uploads import UploadsMixin
-from .writes import WriteResult, idempotency_header, merge_batch_answers, rows_from
+from .writes import (WriteResult, batch_rows, idempotency_header, merge_batch_answers,
+                     rows_from)
 
 __all__ = ["Client", "PROTOCOL_VERSION", "client_requirement"]
 
@@ -54,6 +55,11 @@ def client_requirement(version):
 #: first; the notes and report faces have smaller limits, which the server's
 #: ``batch_too_large`` refusal reports (raised as :class:`BatchTooLarge`).
 DEFAULT_BATCH_LIMIT = 1000
+
+#: Intents whose dry run is never split: the count the user says yes to (what
+#: a retract takes with it, what an undo or a restore brings back) must come
+#: from ONE request.
+UNSPLIT_INTENTS = ("retract", "restore", "undo")
 
 _DEFAULT_TIMEOUT = 60
 _DEFAULT_BASE = "https://api.geodb.io"
@@ -902,17 +908,21 @@ class Client(UploadsMixin, DatasetsMixin):
             body["layer"] = layer
         known = self._batch_limit(model, project) if len(records) > DEFAULT_BATCH_LIMIT else None
         if known is not None and len(records) > known[0]:
-            limit, long_form = known
-            if dry_run and not long_form:
-                return self._validate_in_batches(body, limit, idempotency_key)
-            raise BatchTooLarge.before_sending(model, len(records), limit, long_form=long_form)
+            limit, long_form, group_field = known
+            if dry_run and not long_form and intent not in UNSPLIT_INTENTS:
+                return self._validate_in_batches(body, limit, group_field, idempotency_key)
+            raise BatchTooLarge.before_sending(
+                model, len(records), limit, long_form=long_form,
+                consent=intent if dry_run and intent in UNSPLIT_INTENTS else None)
         return self._records(body, idempotency_key)
 
     def _batch_limit(self, model, project):
-        """``(batch_limit, long_form)`` from ``describe(model)``, cached per
-        (model, project) for this client's life; None when describe does not
-        answer one (the request is then sent, and a server ``batch_too_large``
-        refusal raises :class:`BatchTooLarge` all the same)."""
+        """``(batch_limit, long_form, group_field)`` from ``describe(model)``
+        (``group_field`` = its FIRST identifying field, e.g. the hole of an
+        interval table, or None), cached per (model, project) for this
+        client's life; None when describe does not answer a limit (the request
+        is then sent, and a server ``batch_too_large`` refusal raises
+        :class:`BatchTooLarge` all the same)."""
         cache = self.__dict__.setdefault("_batch_limits", {})
         key = (model, project)
         if key not in cache:
@@ -923,33 +933,51 @@ class Client(UploadsMixin, DatasetsMixin):
                 contract = None
             limit = contract.get("batch_limit") if isinstance(contract, dict) else None
             if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
-                known = (limit, bool(contract.get("long_form")))
+                identity = contract.get("identifying_fields")
+                group = identity[0] if isinstance(identity, list) and identity \
+                    and isinstance(identity[0], str) else None
+                known = (limit, bool(contract.get("long_form")), group)
             cache[key] = known
         return cache[key]
 
-    def _validate_in_batches(self, body, limit, idempotency_key=None):
-        """A dry run over more rows than ``limit``: one request per ``limit``
-        rows, answered as ONE :class:`WriteResult` (``merge_batch_answers``).
-        Each batch carries its own Idempotency-Key (``<key>:batch-<n>``): one
-        key on several different bodies would be refused by the server."""
+    def _validate_in_batches(self, body, limit, group_field=None, idempotency_key=None):
+        """A dry run over more rows than ``limit``: one request per batch of at
+        most ``limit`` rows, answered as ONE :class:`WriteResult`
+        (``merge_batch_answers``). Rows sharing the value of ``group_field``
+        (the record type's first identifying field) are never cut apart, so a
+        hole's intervals are judged together; a single group over the limit
+        raises :class:`BatchTooLarge` naming it. Each batch carries its own
+        Idempotency-Key (``<key>:batch-<n>``): one key on several different
+        bodies would be refused by the server."""
         records = body["records"]
-        answers, sizes = [], []
-        for n, start in enumerate(range(0, len(records), limit), start=1):
-            chunk = dict(body, records=records[start:start + limit])
+        batches = batch_rows(records, limit, group_field)
+        if isinstance(batches, tuple):              # (group value, its row count)
+            value, size = batches
+            raise BatchTooLarge.before_sending(
+                body.get("model"), len(records), limit,
+                group=(group_field, value, size))
+        answers = []
+        for n, positions in enumerate(batches, start=1):
+            chunk = dict(body, records=[records[i] for i in positions])
             key = f"{idempotency_key}:batch-{n}" if idempotency_key else None
             answers.append(self._records(chunk, key).body)
-            sizes.append(len(chunk["records"]))
-        return WriteResult(self, merge_batch_answers(answers, sizes, limit))
+        return WriteResult(self, merge_batch_answers(answers, batches, limit, group_field))
 
     def validate(self, model, rows, intent="create", **kwargs):
         """``write(..., dry_run=True)``: every row's outcome, nothing written.
 
         More rows than the record type's ``batch_limit`` (``describe``) are
-        validated in batches of at most the limit and answered as ONE result
-        (row indexes are positions in ``rows``; ``result["batches"]`` says it
-        was split). A long-form record type (``describe(model)["long_form"]``,
-        e.g. ``Assay``) is never split — a cut could split one record's values
-        — and raises :class:`geodb.BatchTooLarge` instead, before sending."""
+        validated in batches of at most the limit, never parting rows that
+        share its first identifying field (a hole's intervals), and answered
+        as ONE result: row indexes are positions in ``rows``, counts summed,
+        and what the batches answered differently kept per batch in
+        ``result["batches"]["per_batch"]``. Checks across rows (duplicates,
+        overlaps) run within each batch only: write the same rows in the SAME
+        batches. Never split, raising :class:`geodb.BatchTooLarge` before
+        sending: a long-form record type (``describe(model)["long_form"]``,
+        e.g. ``Assay``: a cut could split one record's values), a
+        ``retract`` / ``restore`` / ``undo`` dry run (its count is what the
+        user agrees to), and one group larger than the limit."""
         kwargs["dry_run"] = True
         return self.write(model, rows, intent, **kwargs)
 

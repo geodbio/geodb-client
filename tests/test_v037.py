@@ -14,7 +14,7 @@ import pytest
 
 import geodb
 from geodb import BatchTooLarge, WriteRefused
-from geodb.writes import idempotency_header, merge_batch_answers
+from geodb.writes import batch_rows, idempotency_header, merge_batch_answers
 
 from test_writes import FakeResponse, client
 
@@ -101,23 +101,105 @@ def test_validate_over_the_limit_splits_and_answers_once():
     assert result["batches"]["count"] == 2 and result["batches"]["limit"] == 1000
 
 
-def test_merge_offsets_warning_rows_and_joins_once():
+def test_merge_maps_rows_and_warning_rows_to_positions_and_joins_once():
     w = {"code": "w", "detail": "same"}
     merged = merge_batch_answers(
-        [{"rows": [{"index": 0}], "summary": {"created": 1}, "warnings": [w, {"code": "r",
-                                                                         "rows": [0]}],
-          "ignored_fields": ["b"], "before_writing": {"say": "x", "warnings": 1,
-                                                       "remedies": {"w": "a"}}},
-         {"rows": [{"index": 0}], "summary": {"created": 1}, "warnings": [w, {"code": "r",
-                                                                         "rows": [0]}],
-          "ignored_fields": ["a"], "before_writing": {"say": "y", "warnings": 2,
-                                                       "remedies": {"v": "b"}}}],
-        [3, 1], 3)
-    assert [r["index"] for r in merged["rows"]] == [0, 3]
-    assert merged["warnings"] == [w, {"code": "r", "rows": [0]}, {"code": "r", "rows": [3]}]
+        [{"rows": [{"index": 0}, {"index": 1}], "summary": {"created": 2},
+          "warnings": [w, {"code": "r", "rows": [1]}], "ignored_fields": ["b"]},
+         {"rows": [{"index": 0}], "summary": {"created": 1},
+          "warnings": [w, {"code": "r", "rows": [0]}], "ignored_fields": ["a"]}],
+        [[0, 2], [1]], 2)
+    assert [r["index"] for r in merged["rows"]] == [0, 1, 2]
+    assert merged["warnings"] == [w, {"code": "r", "rows": [2]}, {"code": "r", "rows": [1]}]
     assert merged["ignored_fields"] == ["a", "b"]
-    assert merged["before_writing"] == {"say": "x", "warnings": 3,
-                                        "remedies": {"w": "a", "v": "b"}}
+    assert merged["batches"]["per_batch"] == [{"rows": [0, 2]}, {"rows": [1]}]
+
+
+def test_merge_sums_nested_counts_and_unlinked_assays():
+    merged = merge_batch_answers(
+        [{"summary": {"skipped": 2, "skipped_by_reason": {"exists": 2}},
+          "assays_left_unlinked": 3, "rows": []},
+         {"summary": {"skipped": 3, "skipped_by_reason": {"exists": 1, "duplicate": 2}},
+          "assays_left_unlinked": 4, "rows": []}], [[0], [1]], 1)
+    assert merged["summary"] == {"skipped": 5,
+                                 "skipped_by_reason": {"exists": 3, "duplicate": 2}}
+    assert merged["assays_left_unlinked"] == 7
+
+
+def test_merge_never_keeps_batch_ones_value_alone():
+    a = {"rows": [], "model": "DrillSample", "qaqc": {"verdicts": 1}, "layer": {"id": 1},
+         "company_reach": {"note": "x"}, "unknown_key": 1}
+    b = {"rows": [], "model": "DrillSample", "qaqc": {"verdicts": 2}, "layer": {"id": 1}}
+    merged = merge_batch_answers([a, b], [[0], [1]], 1)
+    assert merged["model"] == "DrillSample" and merged["layer"] == {"id": 1}
+    for key in ("qaqc", "company_reach", "unknown_key"):
+        assert key not in merged, key
+        assert key in merged["batches"]["differing"]
+    per = merged["batches"]["per_batch"]
+    assert per[0]["qaqc"] == {"verdicts": 1} and per[1]["qaqc"] == {"verdicts": 2}
+    assert per[0]["company_reach"] == {"note": "x"} and "company_reach" not in per[1]
+
+
+def test_merge_keeps_every_differing_ask():
+    merged = merge_batch_answers(
+        [{"rows": [], "before_writing": {"say": "x", "warnings": 1, "remedies": {"w": "a"}}},
+         {"rows": [], "before_writing": {"say": "y", "warnings": 2, "remedies": {"v": "b"}}}],
+        [[0], [1]], 1)
+    ask = merged["before_writing"]
+    assert ask["confirm_with_user"] is True and ask["warnings"] == 3
+    assert ask["remedies"] == {"w": "a", "v": "b"} and "per_batch" in ask["say"]
+    assert [p["before_writing"]["say"] for p in merged["batches"]["per_batch"]] == ["x", "y"]
+
+
+def test_the_note_says_cross_row_checks_ran_per_batch():
+    merged = merge_batch_answers([{"rows": []}, {"rows": []}], [[0], [1]], 1, "bhid")
+    note = merged["batches"]["note"]
+    assert "within each batch only" in note and "SAME batches" in note and '"bhid"' in note
+
+
+def test_cuts_never_part_rows_sharing_the_first_identifying_field():
+    rows = [{"bhid": h, "depth_from": d} for h, d in
+            [("A", 0), ("B", 0), ("a ", 1), ("C", 0), ("B", 1), ("D", 0)]]
+    batches = batch_rows(rows, 3, "bhid")
+    # groups in first-appearance order: A{0,2} B{1,4} C{3} D{5}, packed greedily
+    assert batches == [[0, 2], [1, 3, 4], [5]]
+    holes = [{rows[i]["bhid"].strip().lower() for i in b} for b in batches]
+    assert not set.intersection(*holes)
+    assert sorted(i for b in batches for i in b) == list(range(6))
+    assert batch_rows([{"bhid": "A"}] * 4, 3, "bhid") == ("A", 4)
+
+
+def test_validate_cuts_at_holes_and_maps_indexes_back():
+    rows = [{"bhid": f"H{i % 3}", "depth_from": i} for i in range(1200)]
+    describe = FakeResponse(200, {"batch_limit": 1000, "long_form": False,
+                                  "identifying_fields": ["bhid", "depth_from"]})
+    def answer(n):
+        return FakeResponse(200, {"rows": [{"index": j, "status": "created"} for j in range(n)],
+                                  "summary": {"created": n}})
+    gx, s = client(describe, answer(800), answer(400))
+    result = gx.validate("DrillLithology", rows, project=1)
+    sent = [c[2]["json"]["records"] for c in s.calls[1:]]
+    assert [len(b) for b in sent] == [800, 400]
+    assert {r["bhid"] for r in sent[0]}.isdisjoint({r["bhid"] for r in sent[1]})
+    assert [r["index"] for r in result.rows] == list(range(1200))
+    assert result.summary == {"created": 1200}
+
+
+def test_one_hole_over_the_limit_is_refused_naming_it():
+    rows = [{"bhid": "DH-9", "depth_from": i} for i in range(1001)]
+    gx, s = client(FakeResponse(200, {"batch_limit": 1000, "identifying_fields": ["bhid"]}))
+    with pytest.raises(BatchTooLarge) as caught:
+        gx.validate("DrillLithology", rows, project=1)
+    assert "'DH-9'" in str(caught.value) and [c[0] for c in s.calls] == ["GET"]
+
+
+@pytest.mark.parametrize("intent", ["retract", "restore", "undo"])
+def test_a_consent_dry_run_is_never_split(intent):
+    gx, s = client(_describe())
+    with pytest.raises(BatchTooLarge) as caught:
+        gx.validate("ClaimStake", ROWS, intent=intent, project=250)
+    assert [c[0] for c in s.calls] == ["GET"], "nothing POSTed"
+    assert f"{intent} dry run is never split" in str(caught.value)
 
 
 def test_write_over_the_limit_raises_before_sending():

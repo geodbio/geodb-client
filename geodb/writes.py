@@ -24,7 +24,7 @@ the whole request raises :class:`geodb.WriteRefused`.
 import hashlib
 import json
 
-__all__ = ["WriteResult", "rows_from", "idempotency_header"]
+__all__ = ["WriteResult", "rows_from", "idempotency_header", "batch_rows"]
 
 #: The row statuses that mean the server CHANGED something.
 LANDED = ("created", "updated", "accepted", "retracted", "restored", "undone")
@@ -52,13 +52,21 @@ def idempotency_header(key):
 
 
 def _sum_counts(dicts):
+    """Counts summed key by key, RECURSIVELY (``summary.skipped_by_reason`` is
+    a nested count dict); a non-number kept when every batch agrees, else the
+    list of each batch's value."""
+    dicts = [d for d in dicts if d]
     out = {}
-    for d in dicts:
-        for k, v in (d or {}).items():
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                out[k] = out.get(k, 0) + v
-            else:
-                out.setdefault(k, v)
+    for key in dict.fromkeys(k for d in dicts for k in d):
+        values = [d[key] for d in dicts if key in d]
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values):
+            out[key] = sum(values)
+        elif all(isinstance(v, dict) for v in values):
+            out[key] = _sum_counts(values)
+        elif all(v == values[0] for v in values):
+            out[key] = values[0]
+        else:
+            out[key] = values
     return out
 
 
@@ -72,33 +80,98 @@ def _unique(items):
     return out
 
 
-def merge_batch_answers(answers, sizes, limit):
-    """ONE dry-run answer from the answers to consecutive batches of one
-    request's rows (``Client.validate`` over ``batch_limit``): rows keep the
-    index of their position in the rows passed (each batch's indexes offset by
-    the rows before it), ``summary`` and ``cascade`` counts are summed, warnings
-    and list entries joined once each, ``ignored_fields`` united; the first
-    batch's answer gives every other key. ``batches`` says it was split."""
-    merged = dict(answers[0])
-    rows, offset, offsets = [], 0, []
-    for answer, size in zip(answers, sizes):
-        offsets.append(offset)
+def _canon(value):
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def _group_key(value):
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, str):
+        return value.strip().casefold()   # the server's name match folds case
+    return _canon(value)
+
+
+def batch_rows(records, limit, group_field=None):
+    """Positions of ``records`` cut into batches of at most ``limit`` rows,
+    never parting the rows that share a value of ``group_field`` (compared
+    trimmed and case-folded, as the server matches names). Groups are packed
+    in the order they first appear; each batch lists its positions in the
+    order given. A row without the field is its own group. Returns the list
+    of batches, or ``(value, size)`` for a group larger than the limit."""
+    groups, order = {}, []
+    for i, row in enumerate(records):
+        key = _group_key(row.get(group_field)) if group_field else None
+        key = ("row", i) if key is None else ("value", key)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(i)
+    batches, current = [], []
+    for key in order:
+        members = groups[key]
+        if len(members) > limit:
+            return (records[members[0]].get(group_field), len(members))
+        if len(current) + len(members) > limit:
+            batches.append(sorted(current))
+            current = []
+        current.extend(members)
+    if current:
+        batches.append(sorted(current))
+    return batches
+
+
+#: Top-level keys of a records answer merged by rule; every OTHER key is kept
+#: at the top only when every batch answered the same value, else per batch.
+_MERGED_KEYS = ("rows", "summary", "cascade", "warnings", "catalog_entries",
+                "ignored_fields", "sets", "before_writing", "assays_left_unlinked")
+
+BATCHES_NOTE = (
+    "These rows were validated in {n} separate requests of at most {limit} rows (the "
+    "server's batch_limit), cut so that rows sharing {group} stay together. Checks that "
+    "look ACROSS rows (duplicates in the batch, overlapping intervals of one hole) were "
+    "made within each batch only, never across the batches. Row indexes are positions in "
+    "the rows passed. A write of these rows must be sent in the SAME batches "
+    "(result['batches']['per_batch'][i]['rows'] lists each one's row positions), each its "
+    "own write_id and Undo, or through the dataset door for one Undo.")
+
+
+def merge_batch_answers(answers, batch_rows, limit, group_field=None):
+    """ONE dry-run answer from the answers to the batches ``Client.validate``
+    cut over ``batch_limit``. ``batch_rows[i]`` lists the positions (in the rows
+    passed) of batch ``i``'s rows, in the order sent: each row's ``index``, and
+    each warning's ``rows``, map back to those positions. ``summary`` /
+    ``cascade`` counts (nested ones too) and ``assays_left_unlinked`` are
+    summed, warnings and list entries joined once each, ``ignored_fields``
+    united. Any other key is kept at the top only when every batch gave the
+    same value; otherwise each batch's value stays under
+    ``batches.per_batch[i][key]`` (never batch 1's alone)."""
+    def position(i, j):
+        rows = batch_rows[i]
+        return rows[j] if isinstance(j, int) and 0 <= j < len(rows) else j
+
+    merged = {}
+    rows = []
+    for i, answer in enumerate(answers):
         for row in answer.get("rows") or []:
             row = dict(row)
             if isinstance(row.get("index"), int):
-                row["index"] += offset
+                row["index"] = position(i, row["index"])
             rows.append(row)
-        offset += size
-    merged["rows"] = rows
+    merged["rows"] = sorted(rows, key=lambda r: r["index"] if isinstance(r.get("index"), int)
+                            else float("inf"))
     merged["summary"] = _sum_counts(a.get("summary") for a in answers)
     if any(a.get("cascade") for a in answers):
         merged["cascade"] = _sum_counts(a.get("cascade") for a in answers)
+    unlinked = [a.get("assays_left_unlinked") for a in answers if "assays_left_unlinked" in a]
+    if unlinked:
+        if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in unlinked):
+            merged["assays_left_unlinked"] = sum(unlinked)
     warnings = []
-    for answer, base in zip(answers, offsets):
+    for i, answer in enumerate(answers):
         for warning in answer.get("warnings") or []:
             if isinstance(warning, dict) and isinstance(warning.get("rows"), list):
-                warning = dict(warning, rows=[r + base if isinstance(r, int) else r
-                                              for r in warning["rows"]])
+                warning = dict(warning, rows=[position(i, r) for r in warning["rows"]])
             warnings.append(warning)
     if warnings:
         merged["warnings"] = _unique(warnings)
@@ -113,24 +186,53 @@ def merge_batch_answers(answers, sizes, limit):
         sets.update(answer.get("sets") or {})
     if sets:
         merged["sets"] = sets
-    asks = [a.get("before_writing") for a in answers if a.get("before_writing")]
-    if asks:
-        ask = dict(asks[0])
-        counted = [a.get("warnings") for a in asks if isinstance(a.get("warnings"), int)]
-        if counted:
-            ask["warnings"] = sum(counted)
-        remedies = {}
-        for a in asks:
-            remedies.update(a.get("remedies") or {})
-        if remedies:
-            ask["remedies"] = remedies
-        merged["before_writing"] = ask
+
+    per_batch = [{"rows": list(r)} for r in batch_rows]
+    differing = []
+    keys = dict.fromkeys(k for a in answers for k in a if k not in _MERGED_KEYS)
+    if not all(isinstance(a.get("catalog_entries"), list) or not a.get("catalog_entries")
+               for a in answers):
+        keys["catalog_entries"] = None
+    if unlinked and "assays_left_unlinked" not in merged:
+        keys["assays_left_unlinked"] = None
+    for key in keys:
+        values = [_canon(a.get(key)) if key in a else None for a in answers]
+        if all(v == values[0] for v in values) and values[0] is not None:
+            merged[key] = answers[0][key]
+        else:
+            differing.append(key)
+            for i, answer in enumerate(answers):
+                if key in answer:
+                    per_batch[i][key] = answer[key]
+    asks = [a.get("before_writing") for a in answers]
+    if any(asks):
+        present = [a for a in asks if a]
+        if len(present) == len(asks) and all(_canon(a) == _canon(present[0]) for a in present):
+            merged["before_writing"] = present[0]
+        else:
+            ask = {"confirm_with_user": True,
+                   "say": ("The batches answered different asks: read each in "
+                           "result['batches']['per_batch'][i]['before_writing'] and tell the "
+                           "user all of them before any batch is written.")}
+            counted = [a.get("warnings") for a in present if isinstance(a.get("warnings"), int)]
+            if counted:
+                ask["warnings"] = sum(counted)
+            remedies = {}
+            for a in present:
+                remedies.update(a.get("remedies") or {})
+            if remedies:
+                ask["remedies"] = remedies
+            merged["before_writing"] = ask
+            differing.append("before_writing")
+            for i, a in enumerate(asks):
+                if a:
+                    per_batch[i]["before_writing"] = a
     merged["batches"] = {
-        "count": len(answers), "limit": limit,
-        "note": (f"validated in {len(answers)} requests of at most {limit} rows (the "
-                 f"server's batch_limit); row indexes are positions in the rows passed. "
-                 f"A write of these rows must also go in batches of at most {limit}, each "
-                 f"its own write_id and Undo, or through the dataset door for one Undo."),
+        "count": len(answers), "limit": limit, "grouped_by": group_field,
+        "per_batch": per_batch, "differing": differing,
+        "note": BATCHES_NOTE.format(n=len(answers), limit=limit,
+                                    group=f'"{group_field}"' if group_field
+                                    else "nothing (no identifying field)"),
     }
     return merged
 

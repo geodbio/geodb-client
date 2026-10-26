@@ -264,16 +264,26 @@ too). `undo()` and `restore()` take `idempotency_key=` like `write()`.
 **Batch limit and idempotency keys (0.3.7).** A request carries at most the
 record type's `batch_limit` rows (`describe(model)["batch_limit"]`, 1,000 for
 the records door). `gx.validate()` over the limit is split into batches and
-answered as ONE result (row indexes are positions in the rows you passed;
-`result["batches"]` says it was split); a long-form type (`describe(model)
-["long_form"]`, e.g. `Assay`) is never split, because a cut could split one
-record's values. `gx.write()` over the limit raises `geodb.BatchTooLarge`
-(`.limit`, `.rows`) **before anything is sent**: send batches of at most the
-limit (each its own `write_id` and Undo), or the dataset door for one Undo.
+answered as ONE result: rows sharing the record type's first identifying field
+(`describe(model)["identifying_fields"][0]`, e.g. the hole of an interval table)
+stay in one batch, row indexes are positions in the rows you passed, counts are
+summed, and anything the batches answered differently is kept per batch in
+`result["batches"]["per_batch"]`. ⚠️ Checks across rows (duplicates, overlaps)
+run within each batch only, so a write of the same rows must go in the SAME
+batches (`per_batch[i]["rows"]`). Never split, raising `geodb.BatchTooLarge`
+instead: a long-form type (`describe(model)["long_form"]`, e.g. `Assay`; a cut
+could split one record's values), a `retract` / `restore` / `undo` dry run (what
+it reports is what the user agrees to, so it comes from one request), and one
+group larger than the limit. `gx.write()` over the limit raises
+`geodb.BatchTooLarge` (`.limit`, `.rows`) **before anything is sent**: send
+batches of at most the limit (each its own `write_id` and Undo), or the dataset
+door for one Undo.
 Any string works as an `idempotency_key`: one that is not printable ASCII (an
 en dash copied from a name) or is longer than 255 characters is sent as
 `sha256:<hex>` of its UTF-8 bytes, the same header every time, so a retry still
-replays.
+replays. ⚠️ 0.3.6 sent a non-ASCII key that fits Latin-1 (e.g. `é`) as Latin-1
+bytes; 0.3.7 sends its hash, so a retry of such a request ACROSS the upgrade is
+a new request and does not replay the first answer.
 `result.raise_for_refusals()` raises `geodb.RowsRefused` (status 200, `.rows`)
 when rows were refused. `make_default_set` and `qaqc_verdict` have no methods
 on purpose — each is a person's own act on their explicit request (a vendor key
@@ -447,9 +457,11 @@ GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests
 ```
 
 Apache-2.0. Version 0.3.7 (protocol 0.3): 0.3.7 sends any idempotency key safely (a
-non-ASCII or over-long key travels as its sha256, never a `UnicodeEncodeError`), splits an
-over-limit `validate()` into batches answered as one result, and raises `BatchTooLarge`
-before sending an over-limit `write()`. 0.3.6 names a dataset member read from a
+non-ASCII or over-long key travels as its sha256, never a `UnicodeEncodeError`; a Latin-1
+key 0.3.6 sent as Latin-1 is now hashed, so a retry across the upgrade does not replay),
+splits an over-limit `validate()` into batches cut at identity boundaries and answered as
+one result (never a retract / restore / undo dry run), and raises `BatchTooLarge` before
+sending an over-limit `write()`. 0.3.6 names a dataset member read from a
 file like a DataFrame's (`<model>_<stamp>.csv`, so a second rehearsal of the same files is
 never refused for a repeated file name) and prints every summary on a legacy Windows
 (cp1252) console. 0.3.5 added OS-certificate-store TLS,
