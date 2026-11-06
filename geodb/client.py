@@ -772,7 +772,7 @@ class Client(UploadsMixin, DatasetsMixin):
 
     def write(self, model, rows, intent="create", *, logging_set=None, project=None,
               idempotency_key=None, dry_run=False, acknowledge=None, confirm=None,
-              layer=None):
+              layer=None, depth_units=None, elevation_units=None):
         """Write ``rows`` (a list of dicts or a DataFrame) through the one gate.
 
         Every change to the user's geoDB is this ONE call (``POST /api/v2/
@@ -821,6 +821,14 @@ class Client(UploadsMixin, DatasetsMixin):
                 unless ``activate`` — ask first); the answer's ``layer`` gives
                 its id and where the draft can be read; Undo removes it with
                 its features.
+            depth_units: ``"M"`` or ``"FT"`` — the unit the rows' depths and
+                lengths ARE IN, whatever unit the project displays. geoDB
+                stores metres and converts for you: never multiply them
+                yourself. A number copied from a read is ``"M"``. Not sent:
+                metres. The dry run's ``units`` shows a few of your numbers as
+                they will display; show the user before writing.
+            elevation_units: ``"M"`` or ``"FT"`` — only when the elevations are
+                in another unit than ``depth_units`` (they follow it otherwise).
 
         The intents (protocol 0.3, the v0.4 surface):
 
@@ -906,6 +914,10 @@ class Client(UploadsMixin, DatasetsMixin):
             body["confirm"] = confirm
         if layer is not None:
             body["layer"] = layer
+        if depth_units is not None:
+            body["depth_units"] = depth_units
+        if elevation_units is not None:
+            body["elevation_units"] = elevation_units
         known = self._batch_limit(model, project) if len(records) > DEFAULT_BATCH_LIMIT else None
         if known is not None and len(records) > known[0]:
             limit, long_form, group_field = known

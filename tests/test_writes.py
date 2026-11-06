@@ -98,6 +98,23 @@ def test_validate_is_the_dry_run():
         result.undo()
 
 
+def test_the_depth_unit_rides_on_the_body_only_when_stated():
+    """0.3.8: the records gate converts a stated foot to stored metres; the client
+    only carries the statement (never converts, never defaults it)."""
+    gx, s = client(FakeResponse(200, WRITTEN), FakeResponse(200, WRITTEN),
+                   FakeResponse(200, dict(WRITTEN, dry_run=True, write_id=None)))
+    gx.write("DrillCollar", [{"name": "H1", "total_depth": 500}], depth_units="FT")
+    assert s.calls[0][2]["json"]["depth_units"] == "FT"
+    assert "elevation_units" not in s.calls[0][2]["json"]
+    gx.write("DrillCollar", [{"name": "H2", "total_depth": 152.4}])
+    assert "depth_units" not in s.calls[1][2]["json"]
+    gx.validate("DrillCollar", [{"name": "H3", "elevation": 1000}],
+                depth_units="FT", elevation_units="M")
+    body = s.calls[2][2]["json"]
+    assert (body["depth_units"], body["elevation_units"], body["dry_run"]) == ("FT", "M", True)
+    assert body["records"] == [{"name": "H3", "elevation": 1000}]     # numbers untouched
+
+
 def test_a_request_refusal_raises_with_its_code_and_remedy():
     refusal = {"reason_code": "confirm_required", "detail": "A retract needs a confirm.",
                "remedy": "Confirm with the user, then resend.", "offending": {"confirm": None}}

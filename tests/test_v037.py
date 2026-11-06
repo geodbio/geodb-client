@@ -247,4 +247,5 @@ def test_without_describe_the_servers_refusal_is_the_same_typed_error():
 
 def test_batch_too_large_is_exported():
     assert geodb.BatchTooLarge is BatchTooLarge
-    assert geodb.__version__ == "0.3.7"
+    # exported since 0.3.7 (a later release keeps it)
+    assert tuple(int(p) for p in geodb.__version__.split(".")) >= (0, 3, 7)

@@ -248,10 +248,16 @@ gx.restore(retract_write_id)                   # bring a retract back
 for w in gx.writes(undone=False): ...          # what this key wrote, newest first
 ```
 
+**Depth and elevation units (0.3.8).** geoDB stores metres. Rows whose depths or lengths
+are in feet say so with `depth_units="FT"` (`elevation_units=` only when elevations are in
+a different unit from depths); geoDB converts them, so never multiply yourself. Numbers
+copied from a read are metres. Leaving the unit out means metres. The dry run's `units`
+shows a few of your numbers as they will display, so show them to the user before writing.
+
 | Call | Does |
 |---|---|
 | `gx.describe(model)` | the live write contract for `model` |
-| `gx.write(model, rows, intent="create", logging_set=, project=, idempotency_key=, dry_run=, acknowledge=, confirm=, layer=)` | `create` never overwrites (a differing record is skipped, both values named) · `upsert` · `update` (existing records by identity or `id`; never creates) · every other intent (below). Returns a `WriteResult` |
+| `gx.write(model, rows, intent="create", logging_set=, project=, idempotency_key=, dry_run=, acknowledge=, confirm=, layer=, depth_units=, elevation_units=)` | `create` never overwrites (a differing record is skipped, both values named) · `upsert` · `update` (existing records by identity or `id`; never creates) · every other intent (below). Returns a `WriteResult` |
 | `gx.validate(model, rows, …)` | the same call with `dry_run=True` |
 | `gx.retract(model, rows, confirm=False, dry_run=False)` | to the Trash with everything that belongs to them; needs `confirm=True` |
 | `gx.restore(write_id)` / `gx.restore(audit_batch_id=…)` | brings a removed batch back |
@@ -456,7 +462,8 @@ pytest                     # unit tests (mocked transport)
 GEODB_TEST_BASE_URL=http://localhost:8001 GEODB_TEST_TOKEN=gdbg_... pytest tests/test_integration.py
 ```
 
-Apache-2.0. Version 0.3.7 (protocol 0.3): 0.3.7 sends any idempotency key safely (a
+Apache-2.0. Version 0.3.8 (protocol 0.3): 0.3.8 adds `depth_units=` / `elevation_units=`
+to `write()` and `validate()` (feet rows are converted to stored metres by geoDB). 0.3.7 sends any idempotency key safely (a
 non-ASCII or over-long key travels as its sha256, never a `UnicodeEncodeError`; a Latin-1
 key 0.3.6 sent as Latin-1 is now hashed, so a retry across the upgrade does not replay),
 splits an over-limit `validate()` into batches cut at identity boundaries and answered as
